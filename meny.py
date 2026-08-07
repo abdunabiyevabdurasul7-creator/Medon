@@ -1,5 +1,6 @@
 import logging
 import sqlite3
+from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
@@ -43,6 +44,16 @@ CREATE TABLE IF NOT EXISTS promo_uses (
     code TEXT,
     PRIMARY KEY (user_id, code)
 )''')
+
+# --- TO'LOVLAR JADVALI ---
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS payments (
+    payment_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    amount REAL DEFAULT 0,
+    status TEXT DEFAULT 'Kutilmoqda',
+    created_at TEXT
+)''')
 conn.commit()
 
 # --- STEP CONSTANTS ---
@@ -50,10 +61,10 @@ conn.commit()
     PROMO_CODE, PROMO_AMOUNT, PROMO_LIMIT, 
     USE_PROMO, CHECK_ORDER, 
     TRANSFER_USER, TRANSFER_AMOUNT, 
-    ADMIN_APPROVE_PAYMENT,
     MANUAL_ADD_USER, MANUAL_ADD_AMOUNT,
-    MANUAL_SUB_USER, MANUAL_SUB_AMOUNT
-) = range(12)
+    MANUAL_SUB_USER, MANUAL_SUB_AMOUNT,
+    POST_MESSAGE, TOP_UP_AMOUNT
+) = range(13)
 
 # --- ASOSIY MENYU ---
 def main_keyboard():
@@ -64,6 +75,12 @@ def main_keyboard():
         ["📊 Statistika"]
     ], resize_keyboard=True)
 
+# --- BEKOR QILISH TUGMASI UCHUN KLAVIATURA ---
+def cancel_keyboard():
+    return ReplyKeyboardMarkup([
+        ["❌ Bekor qilish"]
+    ], resize_keyboard=True)
+
 # --- START COMMAND ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -71,32 +88,68 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     await update.message.reply_text("Xush kelibsiz! Kerakli bo'limni tanlang:", reply_markup=main_keyboard())
 
-# --- BALANS TO'LDIRISH ---
-async def fill_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    text = (
-        "💳 Balansni to'ldirish uchun:\n\n"
-        "1. Karta raqamiga to'lov qiling:\n"
-        "<code>9860 6067 6078 9275</code> (A.Abdurasul)\n\n"
-        "2. To'lov qilgach, to'lov cheki (skrinshot) rasmini shu botning o'ziga yuboring!\n\n"
-        f"🆔 Sizning ID: <code>{user_id}</code>"
+# --- BALANS TO'LDIRISH (1-QADAM: Summani so'rash) ---
+async def fill_balance_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "💳 Balansni to'ldirish uchun qancha summa kiritmoqchisiz?\n\n"
+        "*(Faqat raqamlarda kiriting, masalan: 15000)*",
+        reply_markup=cancel_keyboard()
     )
-    await update.message.reply_text(text, parse_mode="HTML")
+    return TOP_UP_AMOUNT
 
-# --- CHEK RASMINI TUTIB OLISH ---
+# --- BALANS TO'LDIRISH (2-QADAM: Karta va chekni so'rash) ---
+async def fill_balance_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        amount = float(update.message.text)
+        if amount <= 0:
+            await update.message.reply_text("❌ Noto'g'ri summa kiritildi. Qaytadan kiriting:", reply_markup=cancel_keyboard())
+            return TOP_UP_AMOUNT
+
+        context.user_data['top_up_amount'] = amount
+        user_id = update.effective_user.id
+
+        text = (
+            f"💳 Kiritilgan summa: **{amount:,.0f} so'm**\n\n"
+            "1. Quyidagi karta raqamiga to'lov qiling:\n"
+            "<code>9860 6067 6078 9275</code> (A.Abdurasul)\n\n"
+            "2. To'lov qilgach, to'lov cheki (skrinshot) rasmini shu botning o'ziga yuboring!\n\n"
+            f"🆔 Sizning ID: <code>{user_id}</code>"
+        )
+        await update.message.reply_text(text, parse_mode="HTML", reply_markup=main_keyboard())
+        return ConversationHandler.END
+
+    except ValueError:
+        await update.message.reply_text("❌ Faqat raqam ko'rinishida kiriting:", reply_markup=cancel_keyboard())
+        return TOP_UP_AMOUNT
+
+# --- CHEK RASMINI TUTIB OLISH VA ADMINGA YUBORISH ---
 async def handle_receipt_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     photo_id = update.message.photo[-1].file_id
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    await update.message.reply_text("✅ Chek qabul qilindi! Admin ko'rib chiqqach, balansingiz to'ldiriladi.")
+    amount = context.user_data.get('top_up_amount', 0)
+
+    cursor.execute("INSERT INTO payments (user_id, amount, status, created_at) VALUES (?, ?, 'Kutilmoqda', ?)", (user_id, amount, current_time))
+    conn.commit()
+    payment_id = cursor.lastrowid
+
+    context.user_data.pop('top_up_amount', None)
+
+    await update.message.reply_text("✅ Chek qabul qilindi! Admin ko'rib chiqqach, balansingiz to'ldiriladi.", reply_markup=main_keyboard())
 
     admin_keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ Balans qo'shish", callback_data=f"pay_approve_{user_id}")]
+        [
+            InlineKeyboardButton("➕ Balans qo'shish", callback_data=f"pay_approve_{user_id}_{payment_id}"),
+            InlineKeyboardButton("❌ Rad etish", callback_data=f"pay_reject_{payment_id}")
+        ],
+        [InlineKeyboardButton("💳 To'lovlar tarixi", callback_data="admin_payments_history")]
     ])
 
     username = update.effective_user.username
     user_mention = f"@{username}" if username else "Yo'q"
-    caption_text = f"📥 Yangi to'lov cheki!\n\n👤 Foydalanuvchi ID: {user_id}\n👤 Username: {user_mention}"
+    amount_str = f"{amount:,.0f} so'm" if amount > 0 else "Kiritilmagan"
+    caption_text = f"📥 Yangi to'lov cheki!\n🆔 To'lov ID: #{payment_id}\n👤 Foydalanuvchi ID: {user_id}\n👤 Username: {user_mention}\n💰 Summa: {amount_str}"
 
     await context.bot.send_photo(
         chat_id=ADMIN_ID,
@@ -110,32 +163,66 @@ async def approve_payment_callback(update: Update, context: ContextTypes.DEFAULT
     query = update.callback_query
     await query.answer()
     
-    target_user_id = query.data.split("_")[2]
-    context.user_data['pay_target_user'] = target_user_id
-    
-    await query.message.reply_text(f"💳 ID: {target_user_id} foydalanuvchisining balansiga qancha pul qo'shmoqchisiz (so'mda)?")
-    return ADMIN_APPROVE_PAYMENT
+    data = query.data.split("_")
+    target_user_id = data[2]
+    payment_id = data[3] if len(data) > 3 else None
 
-async def save_payment_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['waiting_for_balance_user'] = target_user_id
+    context.user_data['waiting_for_payment_id'] = payment_id
+    
     try:
-        amount = float(update.message.text)
-        target_user = context.user_data['pay_target_user']
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+        
+    await query.message.reply_text(f"💳 ID: {target_user_id} foydalanuvchisining balansiga qancha pul qo'shmoqchisiz (so'mda)?\n\n*(Faqat raqam yuboring)*")
 
-        cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, target_user))
-        conn.commit()
-
-        await update.message.reply_text(f"✅ User ID {target_user} balansiga {amount:,.0f} so'm qo'shildi!")
-        await context.bot.send_message(target_user, f"🎉 Hisobingiz {amount:,.0f} so'mga to'ldirildi!")
-    except ValueError:
-        await update.message.reply_text("❌ Noto'g'ri summa kiritildi.")
+# --- ADMIN CHEKNI BEKOR QILISH ---
+async def reject_payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
     
-    return ConversationHandler.END
+    data = query.data.split("_")
+    payment_id = data[2]
+
+    cursor.execute("UPDATE payments SET status = 'Rad etildi' WHERE payment_id = ?", (payment_id,))
+    conn.commit()
+    
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+        
+    if query.message.caption:
+        await query.message.edit_caption(caption=query.message.caption + "\n\n❌ **Holat:** To'lov rad etildi!")
+    else:
+        await query.message.reply_text("❌ To'lov rad etildi.")
+
+# --- ADMIN TO'LOVLAR TARIXINI KO'RISH (/payments) ---
+async def admin_payments_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    
+    cursor.execute("SELECT payment_id, user_id, amount, status, created_at FROM payments ORDER BY payment_id DESC LIMIT 15")
+    payments = cursor.fetchall()
+
+    if not payments:
+        await update.message.reply_text("📭 Hozircha to'lovlar tarixi bo'sh.")
+        return
+
+    msg = "📜 **Oxirgi to'lovlar tarixi:**\n\n"
+    for p in payments:
+        p_id, u_id, amt, status, date = p
+        amt_str = f"{amt:,.0f} so'm" if amt else "Aniqlanmagan"
+        msg += f"🆔 #{p_id} | User: <code>{u_id}</code>\n💰 Summa: {amt_str}\n📌 Holati: {status} | 🕒 {date}\n-------------------\n"
+
+    await update.message.reply_text(msg, parse_mode="HTML")
 
 # --- ADMIN QO'LDA BALANS QO'SHISH (/addbalance) ---
 async def manual_add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return ConversationHandler.END
-    await update.message.reply_text("➕ Balansiga pul qo'shmoqchi bo'lgan foydalanuvchining ID raqamini kiriting:")
+    await update.message.reply_text("➕ Balansiga pul qo'shmoqchi bo'lgan foydalanuvchining ID raqamini kiriting:", reply_markup=cancel_keyboard())
     return MANUAL_ADD_USER
 
 async def manual_add_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -143,35 +230,37 @@ async def manual_add_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = int(update.message.text)
         cursor.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
         if not cursor.fetchone():
-            await update.message.reply_text("❌ Bunday foydalanuvchi topilmadi.")
+            await update.message.reply_text("❌ Bunday foydalanuvchi topilmadi.", reply_markup=main_keyboard())
             return ConversationHandler.END
         
         context.user_data['manual_add_user_id'] = user_id
-        await update.message.reply_text(f"💰 ID: {user_id} balansiga qancha so'm QO'SHMOQCHISIZ?")
+        await update.message.reply_text(f"💰 ID: {user_id} balansiga qancha so'm QO'SHMOQCHISIZ?", reply_markup=cancel_keyboard())
         return MANUAL_ADD_AMOUNT
     except ValueError:
-        await update.message.reply_text("❌ ID faqat raqamlardan iborat bo'lishi kerak.")
+        await update.message.reply_text("❌ ID faqat raqamlardan iborat bo'lishi kerak.", reply_markup=main_keyboard())
         return ConversationHandler.END
 
 async def manual_add_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         amount = float(update.message.text)
         user_id = context.user_data['manual_add_user_id']
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
         cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
+        cursor.execute("INSERT INTO payments (user_id, amount, status, created_at) VALUES (?, ?, 'Qo''lda qo''shildi', ?)", (user_id, amount, current_time))
         conn.commit()
         
-        await update.message.reply_text(f"✅ ID: {user_id} balansiga {amount:,.0f} so'm qo'shildi!")
+        await update.message.reply_text(f"✅ ID: {user_id} balansiga {amount:,.0f} so'm qo'shildi!", reply_markup=main_keyboard())
         await context.bot.send_message(user_id, f"🎉 Hisobingizga admin tomonidan {amount:,.0f} so'm qo'shildi!")
     except ValueError:
-        await update.message.reply_text("❌ Noto'g'ri summa kiritildi.")
+        await update.message.reply_text("❌ Noto'g'ri summa kiritildi.", reply_markup=main_keyboard())
     return ConversationHandler.END
 
 # --- ADMIN QO'LDA BALANS AYRISH (/subbalance) ---
 async def manual_sub_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return ConversationHandler.END
-    await update.message.reply_text("➖ Balansidan pul AYRIMOQCHI bo'lgan foydalanuvchining ID raqamini kiriting:")
+    await update.message.reply_text("➖ Balansidan pul AYRIMOQCHI bo'lgan foydalanuvchining ID raqamini kiriting:", reply_markup=cancel_keyboard())
     return MANUAL_SUB_USER
 
 async def manual_sub_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -179,14 +268,14 @@ async def manual_sub_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = int(update.message.text)
         cursor.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
         if not cursor.fetchone():
-            await update.message.reply_text("❌ Bunday foydalanuvchi topilmadi.")
+            await update.message.reply_text("❌ Bunday foydalanuvchi topilmadi.", reply_markup=main_keyboard())
             return ConversationHandler.END
         
         context.user_data['manual_sub_user_id'] = user_id
-        await update.message.reply_text(f"📉 ID: {user_id} balansidan qancha so'm AYRIMOQCHISIZ?")
+        await update.message.reply_text(f"📉 ID: {user_id} balansidan qancha so'm AYRIMOQCHISIZ?", reply_markup=cancel_keyboard())
         return MANUAL_SUB_AMOUNT
     except ValueError:
-        await update.message.reply_text("❌ ID faqat raqamlardan iborat bo'lishi kerak.")
+        await update.message.reply_text("❌ ID faqat raqamlardan iborat bo'lishi kerak.", reply_markup=main_keyboard())
         return ConversationHandler.END
 
 async def manual_sub_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -197,34 +286,71 @@ async def manual_sub_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (amount, user_id))
         conn.commit()
         
-        await update.message.reply_text(f"✅ ID: {user_id} balansidan {amount:,.0f} so'm ayrib tashlandi!")
+        await update.message.reply_text(f"✅ ID: {user_id} balansidan {amount:,.0f} so'm ayirib tashlandi!", reply_markup=main_keyboard())
         await context.bot.send_message(user_id, f"⚠️ Balansingizdan admin tomonidan {amount:,.0f} so'm olib tashlandi.")
     except ValueError:
-        await update.message.reply_text("❌ Noto'g'ri summa kiritildi.")
+        await update.message.reply_text("❌ Noto'g'ri summa kiritildi.", reply_markup=main_keyboard())
+    return ConversationHandler.END
+
+# --- ADMIN POST YUBORISH (/post) ---
+async def post_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ Bu buyruq faqat Admin uchun!")
+        return ConversationHandler.END
+
+    await update.message.reply_text(
+        "📢 Barcha foydalanuvchilarga yubormoqchi bo'lgan xabaringizni yuboring (Matn, rasm, video yoki istalgan fayl):",
+        reply_markup=cancel_keyboard()
+    )
+    return POST_MESSAGE
+
+async def post_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cursor.execute("SELECT user_id FROM users")
+    users = cursor.fetchall()
+
+    success_count = 0
+    fail_count = 0
+
+    await update.message.reply_text("⏳ Xabar foydalanuvchilarga tarqatilmoqda, iltimos kuting...", reply_markup=main_keyboard())
+
+    for user in users:
+        user_id = user[0]
+        try:
+            await update.message.copy(chat_id=user_id)
+            success_count += 1
+        except Exception:
+            fail_count += 1
+
+    await update.message.reply_text(
+        f"✅ Post muvaffaqiyatli tarqatildi!\n\n"
+        f"📤 Yuborildi: {success_count} ta\n"
+        f"❌ Xatolik (botni bloklaganlar): {fail_count} ta",
+        reply_markup=main_keyboard()
+    )
     return ConversationHandler.END
 
 # --- PUL O'TKAZISH TIZIMI ---
 async def transfer_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("💸 Pul o'tkazmoqchi bo'lgan foydalanuvchining Telegram ID raqamini kiriting:")
+    await update.message.reply_text("💸 Pul o'tkazmoqchi bo'lgan foydalanuvchining Telegram ID raqamini kiriting:", reply_markup=cancel_keyboard())
     return TRANSFER_USER
 
 async def transfer_get_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         target_id = int(update.message.text)
         if target_id == update.effective_user.id:
-            await update.message.reply_text("❌ O'zingizga pul o'tkaza olmaysiz!")
+            await update.message.reply_text("❌ O'zingizga pul o'tkaza olmaysiz!", reply_markup=main_keyboard())
             return ConversationHandler.END
 
         cursor.execute("SELECT user_id FROM users WHERE user_id = ?", (target_id,))
         if not cursor.fetchone():
-            await update.message.reply_text("❌ Bunday foydalanuvchi botda topilmadi.")
+            await update.message.reply_text("❌ Bunday foydalanuvchi botda topilmadi.", reply_markup=main_keyboard())
             return ConversationHandler.END
 
         context.user_data['transfer_target'] = target_id
-        await update.message.reply_text("Qancha summa o'tkazmoqchisiz (masalan: 10000)?")
+        await update.message.reply_text("Qancha summa o'tkazmoqchisiz (masalan: 10000)?", reply_markup=cancel_keyboard())
         return TRANSFER_AMOUNT
     except ValueError:
-        await update.message.reply_text("❌ Noto'g'ri ID kiritildi.")
+        await update.message.reply_text("❌ Noto'g'ri ID kiritildi.", reply_markup=main_keyboard())
         return ConversationHandler.END
 
 async def transfer_get_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -234,7 +360,7 @@ async def transfer_get_amount(update: Update, context: ContextTypes.DEFAULT_TYPE
         target_id = context.user_data['transfer_target']
 
         if amount <= 0:
-            await update.message.reply_text("❌ Noto'g'ri summa kiritildi.")
+            await update.message.reply_text("❌ Noto'g'ri summa kiritildi.", reply_markup=main_keyboard())
             return ConversationHandler.END
 
         cursor.execute("SELECT balance FROM users WHERE user_id = ?", (sender_id,))
@@ -242,24 +368,24 @@ async def transfer_get_amount(update: Update, context: ContextTypes.DEFAULT_TYPE
         sender_balance = res[0] if res else 0
 
         if sender_balance < amount:
-            await update.message.reply_text("❌ Balansda yetarli mablag' mavjud emas!")
+            await update.message.reply_text("❌ Balansda yetarli mablag' mavjud emas!", reply_markup=main_keyboard())
             return ConversationHandler.END
 
         cursor.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (amount, sender_id))
         cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, target_id))
         conn.commit()
 
-        await update.message.reply_text(f"✅ {target_id} ID egasiga {amount:,.0f} so'm muvaffaqiyatli o'tkazildi!")
+        await update.message.reply_text(f"✅ {target_id} ID egasiga {amount:,.0f} so'm muvaffaqiyatli o'tkazildi!", reply_markup=main_keyboard())
         await context.bot.send_message(target_id, f"🎉 Hisobingizga {sender_id} ID egasi tomonidan {amount:,.0f} so'm o'tkazildi!")
 
     except ValueError:
-        await update.message.reply_text("❌ Noto'g'ri summa kiritildi.")
+        await update.message.reply_text("❌ Noto'g'ri summa kiritildi.", reply_markup=main_keyboard())
 
     return ConversationHandler.END
 
 # --- BUYURTMANI TEKSHIRISH ---
 async def check_order_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔍 Tekshirmoqchi bo'lgan Buyurtma ID raqamini kiriting:")
+    await update.message.reply_text("🔍 Tekshirmoqchi bo'lgan Buyurtma ID raqamini kiriting:", reply_markup=cancel_keyboard())
     return CHECK_ORDER
 
 async def check_order_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -279,18 +405,18 @@ async def check_order_process(update: Update, context: ContextTypes.DEFAULT_TYPE
                 f"💵 Narxi: {price:,.0f} so'm\n"
                 f"📌 Holati: {status_icon} {status}"
             )
-            await update.message.reply_text(msg)
+            await update.message.reply_text(msg, reply_markup=main_keyboard())
         else:
-            await update.message.reply_text("❌ Sizga tegishli bunday buyurtma ID topilmadi.")
+            await update.message.reply_text("❌ Sizga tegishli bunday buyurtma ID topilmadi.", reply_markup=main_keyboard())
 
     except ValueError:
-        await update.message.reply_text("❌ Buyurtma ID faqat raqamlardan iborat bo'ladi.")
+        await update.message.reply_text("❌ Buyurtma ID faqat raqamlardan iborat bo'ladi.", reply_markup=main_keyboard())
 
     return ConversationHandler.END
 
 # --- PROMOKOD ISHLATISH ---
 async def use_promo_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🎁 Promokodizni kiriting:")
+    await update.message.reply_text("🎁 Promokodizni kiriting:", reply_markup=cancel_keyboard())
     return USE_PROMO
 
 async def use_promo_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -301,18 +427,18 @@ async def use_promo_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
     promo = cursor.fetchone()
 
     if not promo:
-        await update.message.reply_text("❌ Bunday promokod mavjud emas!")
+        await update.message.reply_text("❌ Bunday promokod mavjud emas!", reply_markup=main_keyboard())
         return ConversationHandler.END
 
     amount, limit_count, used_count = promo
 
     if used_count >= limit_count:
-        await update.message.reply_text("❌ Ushbu promokod ishlatilish limiti tugagan!")
+        await update.message.reply_text("❌ Ushbu promokod ishlatilish limiti tugagan!", reply_markup=main_keyboard())
         return ConversationHandler.END
 
     cursor.execute("SELECT 1 FROM promo_uses WHERE user_id = ? AND code = ?", (user_id, code))
     if cursor.fetchone():
-        await update.message.reply_text("❌ Siz ushbu promokodni avval ishlatgansiz!")
+        await update.message.reply_text("❌ Siz ushbu promokodni avval ishlatgansiz!", reply_markup=main_keyboard())
         return ConversationHandler.END
 
     cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
@@ -320,7 +446,7 @@ async def use_promo_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cursor.execute("INSERT INTO promo_uses (user_id, code) VALUES (?, ?)", (user_id, code))
     conn.commit()
 
-    await update.message.reply_text(f"🎉 Tabriklaymiz! Promokod muvaffaqiyatli faollashtirildi.\n💰 Balansingizga {amount:,.0f} so'm qo'shildi!")
+    await update.message.reply_text(f"🎉 Tabriklaymiz! Promokod muvaffaqiyatli faollashtirildi.\n💰 Balansingizga {amount:,.0f} so'm qo'shildi!", reply_markup=main_keyboard())
     return ConversationHandler.END
 
 # --- ADMIN PROMOKOD YARATISH (/addpromo) ---
@@ -329,21 +455,21 @@ async def add_promo_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Bu buyruq faqat Admin uchun!")
         return ConversationHandler.END
 
-    await update.message.reply_text("🔑 Yangi promokod nomini kiriting (Masalan: BONUS5000):")
+    await update.message.reply_text("🔑 Yangi promokod nomini kiriting (Masalan: BONUS5000):", reply_markup=cancel_keyboard())
     return PROMO_CODE
 
 async def add_promo_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['new_promo_code'] = update.message.text.strip()
-    await update.message.reply_text("💰 Promokod summasini kiriting (so'mda):")
+    await update.message.reply_text("💰 Promokod summasini kiriting (so'mda):", reply_markup=cancel_keyboard())
     return PROMO_AMOUNT
 
 async def add_promo_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         context.user_data['new_promo_amount'] = float(update.message.text)
-        await update.message.reply_text("👥 Nechta foydalanuvchi ishlata olishini (limit sonini) kiriting:")
+        await update.message.reply_text("👥 Nechta foydalanuvchi ishlata olishini (limit sonini) kiriting:", reply_markup=cancel_keyboard())
         return PROMO_LIMIT
     except ValueError:
-        await update.message.reply_text("❌ Summani raqamda kiriting.")
+        await update.message.reply_text("❌ Summani raqamda kiriting.", reply_markup=main_keyboard())
         return ConversationHandler.END
 
 async def add_promo_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -355,9 +481,9 @@ async def add_promo_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor.execute("INSERT OR REPLACE INTO promocodes (code, amount, limit_count) VALUES (?, ?, ?)", (code, amount, limit))
         conn.commit()
 
-        await update.message.reply_text(f"✅ Promokod muvaffaqiyatli yaratildi!\n\n🔑 Kodu: {code}\n💰 Summasi: {amount:,.0f} so'm\n👥 Limiti: {limit} ta")
+        await update.message.reply_text(f"✅ Promokod muvaffaqiyatli yaratildi!\n\n🔑 Kodu: {code}\n💰 Summasi: {amount:,.0f} so'm\n👥 Limiti: {limit} ta", reply_markup=main_keyboard())
     except ValueError:
-        await update.message.reply_text("❌ Limit sonini raqamda kiriting.")
+        await update.message.reply_text("❌ Limit sonini raqamda kiriting.", reply_markup=main_keyboard())
 
     return ConversationHandler.END
 
@@ -519,6 +645,16 @@ async def category_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
         await query.edit_message_text("🛒 Kerakli bo'limni tanlang:", reply_markup=keyboard)
 
+    elif query.data == "admin_payments_history":
+        cursor.execute("SELECT payment_id, user_id, amount, status, created_at FROM payments ORDER BY payment_id DESC LIMIT 10")
+        payments = cursor.fetchall()
+        msg = "📜 **Oxirgi to'lovlar tarixi:**\n\n"
+        for p in payments:
+            p_id, u_id, amt, status, date = p
+            amt_str = f"{amt:,.0f} so'm" if amt else "Kiritilmagan"
+            msg += f"🆔 #{p_id} | User: <code>{u_id}</code>\n💰 Summa: {amt_str}\n📌 Holat: {status} | 🕒 {date}\n-------------------\n"
+        await query.message.reply_text(msg, parse_mode="HTML")
+
 # --- BUYURTMA XARIDI ---
 async def process_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -582,6 +718,38 @@ async def admin_order_action(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.edit_message_text(f"❌ Buyurtma #{order_id} bekor qilindi.")
         await context.bot.send_message(user_id, f"⚠️ Sizning #{order_id} raqamli buyurtmangiz bekor qilindi. Pul balansingizga qaytarildi.")
 
+# --- GLOBAL TEXT MESSAGE HANDLER ---
+async def global_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        return
+
+    target_user = context.user_data.get('waiting_for_balance_user')
+    payment_id = context.user_data.get('waiting_for_payment_id')
+
+    if target_user:
+        try:
+            amount = float(update.message.text)
+            
+            cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, int(target_user)))
+            
+            if payment_id:
+                cursor.execute("UPDATE payments SET amount = ?, status = 'Tasdiqlandi' WHERE payment_id = ?", (amount, int(payment_id)))
+            else:
+                current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                cursor.execute("INSERT INTO payments (user_id, amount, status, created_at) VALUES (?, ?, 'Tasdiqlandi', ?)", (int(target_user), amount, current_time))
+            
+            conn.commit()
+
+            await update.message.reply_text(f"✅ User ID {target_user} balansiga {amount:,.0f} so'm qo'shildi va to'lov saqlandi!", reply_markup=main_keyboard())
+            await context.bot.send_message(int(target_user), f"🎉 Hisobingiz admin tomonidan {amount:,.0f} so'mga to'ldirildi!")
+
+            context.user_data.pop('waiting_for_balance_user', None)
+            context.user_data.pop('waiting_for_payment_id', None)
+        except ValueError:
+            await update.message.reply_text("❌ Xato! Faqat raqam yuboring (masalan: 10000):")
+        return
+
 # --- CANCEL ---
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Jarayon bekor qilindi.", reply_markup=main_keyboard())
@@ -592,85 +760,99 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.Regex("^💳 Balans to'ldirish$"), fill_balance))
+    app.add_handler(CommandHandler("payments", admin_payments_cmd))
     app.add_handler(MessageHandler(filters.Regex("^📊 Statistika$"), show_stats))
     app.add_handler(MessageHandler(filters.Regex("^👤 Balans va Profil$"), show_profile))
     app.add_handler(MessageHandler(filters.Regex("^🛍️ Buyurtma berish$"), order_start))
     
     app.add_handler(MessageHandler(filters.PHOTO, handle_receipt_photo))
 
-    app.add_handler(CallbackQueryHandler(category_callback, pattern="^(cat_|grand_)"))
+    app.add_handler(CallbackQueryHandler(category_callback, pattern="^(cat_|grand_|admin_payments_history)"))
     app.add_handler(CallbackQueryHandler(process_buy, pattern="^buy_"))
     app.add_handler(CallbackQueryHandler(admin_order_action, pattern="^adm_"))
+    app.add_handler(CallbackQueryHandler(approve_payment_callback, pattern="^pay_approve_"))
+    app.add_handler(CallbackQueryHandler(reject_payment_callback, pattern="^pay_reject_"))
 
-    pay_approve_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(approve_payment_callback, pattern="^pay_approve_")],
+    # Balans to'ldirish uchun Conversation Handler
+    top_up_conv = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex("^💳 Balans to'ldirish$"), fill_balance_start)],
         states={
-            ADMIN_APPROVE_PAYMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_payment_amount)]
+            TOP_UP_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex("^❌ Bekor qilish$"), fill_balance_amount)]
         },
-        fallbacks=[CommandHandler("cancel", cancel)]
+        fallbacks=[MessageHandler(filters.Regex("^❌ Bekor qilish$"), cancel), CommandHandler("cancel", cancel)]
     )
+    app.add_handler(top_up_conv)
 
     transfer_conv = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^💸 Pul o'tkazish$"), transfer_start)],
         states={
-            TRANSFER_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, transfer_get_user)],
-            TRANSFER_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, transfer_get_amount)]
+            TRANSFER_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex("^❌ Bekor qilish$"), transfer_get_user)],
+            TRANSFER_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex("^❌ Bekor qilish$"), transfer_get_amount)]
         },
-        fallbacks=[CommandHandler("cancel", cancel)]
+        fallbacks=[MessageHandler(filters.Regex("^❌ Bekor qilish$"), cancel), CommandHandler("cancel", cancel)]
     )
 
     check_order_conv = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^🔍 Buyurtmani tekshirish$"), check_order_start)],
         states={
-            CHECK_ORDER: [MessageHandler(filters.TEXT & ~filters.COMMAND, check_order_process)]
+            CHECK_ORDER: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex("^❌ Bekor qilish$"), check_order_process)]
         },
-        fallbacks=[CommandHandler("cancel", cancel)]
+        fallbacks=[MessageHandler(filters.Regex("^❌ Bekor qilish$"), cancel), CommandHandler("cancel", cancel)]
     )
 
     use_promo_conv = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^🎁 Promokod$"), use_promo_start)],
         states={
-            USE_PROMO: [MessageHandler(filters.TEXT & ~filters.COMMAND, use_promo_process)]
+            USE_PROMO: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex("^❌ Bekor qilish$"), use_promo_process)]
         },
-        fallbacks=[CommandHandler("cancel", cancel)]
+        fallbacks=[MessageHandler(filters.Regex("^❌ Bekor qilish$"), cancel), CommandHandler("cancel", cancel)]
     )
 
     add_promo_conv = ConversationHandler(
         entry_points=[CommandHandler("addpromo", add_promo_start)],
         states={
-            PROMO_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_promo_code)],
-            PROMO_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_promo_amount)],
-            PROMO_LIMIT: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_promo_limit)]
+            PROMO_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex("^❌ Bekor qilish$"), add_promo_code)],
+            PROMO_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex("^❌ Bekor qilish$"), add_promo_amount)],
+            PROMO_LIMIT: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex("^❌ Bekor qilish$"), add_promo_limit)]
         },
-        fallbacks=[CommandHandler("cancel", cancel)]
+        fallbacks=[MessageHandler(filters.Regex("^❌ Bekor qilish$"), cancel), CommandHandler("cancel", cancel)]
     )
 
     manual_add_conv = ConversationHandler(
         entry_points=[CommandHandler("addbalance", manual_add_start)],
         states={
-            MANUAL_ADD_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, manual_add_user)],
-            MANUAL_ADD_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, manual_add_amount)]
+            MANUAL_ADD_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex("^❌ Bekor qilish$"), manual_add_user)],
+            MANUAL_ADD_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex("^❌ Bekor qilish$"), manual_add_amount)]
         },
-        fallbacks=[CommandHandler("cancel", cancel)]
+        fallbacks=[MessageHandler(filters.Regex("^❌ Bekor qilish$"), cancel), CommandHandler("cancel", cancel)]
     )
 
     manual_sub_conv = ConversationHandler(
         entry_points=[CommandHandler("subbalance", manual_sub_start)],
         states={
-            MANUAL_SUB_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, manual_sub_user)],
-            MANUAL_SUB_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, manual_sub_amount)]
+            MANUAL_SUB_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex("^❌ Bekor qilish$"), manual_sub_user)],
+            MANUAL_SUB_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex("^❌ Bekor qilish$"), manual_sub_amount)]
         },
-        fallbacks=[CommandHandler("cancel", cancel)]
+        fallbacks=[MessageHandler(filters.Regex("^❌ Bekor qilish$"), cancel), CommandHandler("cancel", cancel)]
     )
 
-    app.add_handler(pay_approve_conv)
+    post_conv = ConversationHandler(
+        entry_points=[CommandHandler("post", post_start)],
+        states={
+            POST_MESSAGE: [MessageHandler((filters.ALL & ~filters.COMMAND) & ~filters.Regex("^❌ Bekor qilish$"), post_send)]
+        },
+        fallbacks=[MessageHandler(filters.Regex("^❌ Bekor qilish$"), cancel), CommandHandler("cancel", cancel)]
+    )
+
     app.add_handler(transfer_conv)
     app.add_handler(check_order_conv)
     app.add_handler(use_promo_conv)
     app.add_handler(add_promo_conv)
     app.add_handler(manual_add_conv)
     app.add_handler(manual_sub_conv)
+    app.add_handler(post_conv)
+
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, global_message_handler))
 
     print("Bot muvaffaqiyatli ishga tushdi...")
     app.run_polling()
