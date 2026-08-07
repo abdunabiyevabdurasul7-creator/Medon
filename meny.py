@@ -281,15 +281,34 @@ async def manual_sub_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def manual_sub_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         amount = float(update.message.text)
-        user_id = context.user_data['manual_sub_user_id']
+        user_id = context.user_data.get('manual_sub_user_id')
         
+        if not user_id:
+            await update.message.reply_text("❌ Xatolik yuz berdi. Qaytadan urinib ko'ring.", reply_markup=main_keyboard())
+            return ConversationHandler.END
+
+        if amount <= 0:
+            await update.message.reply_text("❌ Summa 0 dan katta bo'lishi kerak.", reply_markup=cancel_keyboard())
+            return MANUAL_SUB_AMOUNT
+
+        cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+        res = cursor.fetchone()
+        current_balance = res[0] if res else 0
+
+        if current_balance < amount:
+            await update.message.reply_text(f"⚠️ Foydalanuvchining balansi yetarli emas! (Joriy balans: {current_balance:,.0f} so'm)", reply_markup=main_keyboard())
+            return ConversationHandler.END
+
         cursor.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (amount, user_id))
         conn.commit()
         
         await update.message.reply_text(f"✅ ID: {user_id} balansidan {amount:,.0f} so'm ayirib tashlandi!", reply_markup=main_keyboard())
         await context.bot.send_message(user_id, f"⚠️ Balansingizdan admin tomonidan {amount:,.0f} so'm olib tashlandi.")
+        
     except ValueError:
-        await update.message.reply_text("❌ Noto'g'ri summa kiritildi.", reply_markup=main_keyboard())
+        await update.message.reply_text("❌ Noto'g'ri summa kiritildi. Faqat raqam kiriting:", reply_markup=cancel_keyboard())
+        return MANUAL_SUB_AMOUNT
+        
     return ConversationHandler.END
 
 # --- ADMIN POST YUBORISH (/post) ---
