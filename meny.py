@@ -386,7 +386,8 @@ async def order_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("📱 Telegram xizmatlari", callback_data="cat_telegram")],
         [InlineKeyboardButton("🎮 PUBG Mobile UC", callback_data="cat_pubg")],
-        [InlineKeyboardButton("🔥 Free Fire Diamond", callback_data="cat_ff")]
+        [InlineKeyboardButton("🔥 Free Fire Diamond", callback_data="cat_ff")],
+        [InlineKeyboardButton("🕹️ Grand Mobile ID", callback_data="cat_grand")]
     ])
     await update.message.reply_text("🛒 Kerakli bo'limni tanlang:", reply_markup=keyboard)
 
@@ -447,11 +448,74 @@ async def category_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
         await query.edit_message_text("🔥 Free Fire Diamond paketlari:", reply_markup=keyboard)
 
+    elif query.data == "cat_grand":
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔥 Grand 5x Tariflar", callback_data="grand_5x")],
+            [InlineKeyboardButton("💎 Grand 4x Tariflar", callback_data="grand_4x")],
+            [InlineKeyboardButton("💰 Grand 3x Tariflar", callback_data="grand_3x")],
+            [InlineKeyboardButton("📱 Grand Oddiy Tariflar", callback_data="grand_normal")],
+            [InlineKeyboardButton("🔙 Orqaga", callback_data="cat_back")]
+        ])
+        await query.edit_message_text("🕹️ Grand Mobile GC paketlari:", reply_markup=keyboard)
+
+    elif query.data == "grand_5x":
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("75 Gc — 5,000 so'm", callback_data="buy_Grand 5x 75 Gc_5000")],
+            [InlineKeyboardButton("150 Gc — 8,000 so'm", callback_data="buy_Grand 5x 150 Gc_8000")],
+            [InlineKeyboardButton("450 Gc — 18,000 so'm", callback_data="buy_Grand 5x 450 Gc_18000")],
+            [InlineKeyboardButton("1000 Gc — 37,000 so'm", callback_data="buy_Grand 5x 1000 Gc_37000")],
+            [InlineKeyboardButton("2525 Gc — 89,000 so'm", callback_data="buy_Grand 5x 2525 Gc_89000")],
+            [InlineKeyboardButton("5100 Gc — 175,000 so'm", callback_data="buy_Grand 5x 5100 Gc_175000")],
+            [InlineKeyboardButton("12875 Gc — 427,000 so'm", callback_data="buy_Grand 5x 12875 Gc_427000")],
+            [InlineKeyboardButton("🔙 Orqaga", callback_data="cat_grand")]
+        ])
+        await query.edit_message_text("🕹️ Grand Mobile 5x GC paketlari:", reply_markup=keyboard)
+
+    elif query.data == "grand_4x":
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("60 GC — 4,500 so'm", callback_data="buy_Grand 4x 60 GC_4500")],
+            [InlineKeyboardButton("120 GC — 7,000 so'm", callback_data="buy_Grand 4x 120 GC_7000")],
+            [InlineKeyboardButton("360 GC — 16,500 so'm", callback_data="buy_Grand 4x 360 GC_16500")],
+            [InlineKeyboardButton("800 GC — 36,000 so'm", callback_data="buy_Grand 4x 800 GC_36000")],
+            [InlineKeyboardButton("2025 GC — 87,000 so'm", callback_data="buy_Grand 4x 2025 GC_87000")],
+            [InlineKeyboardButton("4100 GC — 173,000 so'm", callback_data="buy_Grand 4x 4100 GC_173000")],
+            [InlineKeyboardButton("10375 GC — 426,000 so'm", callback_data="buy_Grand 4x 10375 GC_426000")],
+            [InlineKeyboardButton("🔙 Orqaga", callback_data="cat_grand")]
+        ])
+        await query.edit_message_text("🕹️ Grand Mobile 4x GC paketlari:", reply_markup=keyboard)
+
+    elif query.data == "grand_3x":
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("45 GC — 3,000 so'm", callback_data="buy_Grand 3x 45 GC_3000")],
+            [InlineKeyboardButton("90 GC — 6,000 so'm", callback_data="buy_Grand 3x 90 GC_6000")],
+            [InlineKeyboardButton("270 GC — 16,000 so'm", callback_data="buy_Grand 3x 270 GC_16000")],
+            [InlineKeyboardButton("600 GC — 35,000 so'm", callback_data="buy_Grand 3x 600 GC_35000")],
+            [InlineKeyboardButton("1525 GC — 86,000 so'm", callback_data="buy_Grand 3x 1525 GC_86000")],
+            [InlineKeyboardButton("3100 GC — 172,000 so'm", callback_data="buy_Grand 3x 3100 GC_172000")],
+            [InlineKeyboardButton("7875 GC — 424,000 so'm", callback_data="buy_Grand 3x 7875 GC_424000")],
+            [InlineKeyboardButton("🔙 Orqaga", callback_data="cat_grand")]
+        ])
+        await query.edit_message_text("🕹️ Grand Mobile 3x GC paketlari:", reply_markup=keyboard)
+
+    elif query.data == "grand_normal":
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("15 GC — 3,500 so'm", callback_data="buy_Grand 15 GC_3500")],
+            [InlineKeyboardButton("30 GC — 5,000 so'm", callback_data="buy_Grand 30 GC_5000")],
+            [InlineKeyboardButton("90 GC — 15,500 so'm", callback_data="buy_Grand 90 GC_15500")],
+            [InlineKeyboardButton("200 GC — 34,000 so'm", callback_data="buy_Grand 200 GC_34000")],
+            [InlineKeyboardButton("500 GC — 85,000 so'm", callback_data="buy_Grand 500 GC_85000")],
+            [InlineKeyboardButton("1000 GC — 169,000 so'm", callback_data="buy_Grand 1000 GC_169000")],
+            [InlineKeyboardButton("2500 GC — 422,000 so'm", callback_data="buy_Grand 2500 GC_422000")],
+            [InlineKeyboardButton("🔙 Orqaga", callback_data="cat_grand")]
+        ])
+        await query.edit_message_text("🕹️ Grand Mobile oddiy GC paketlari:", reply_markup=keyboard)
+
     elif query.data == "cat_back":
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("📱 Telegram xizmatlari", callback_data="cat_telegram")],
             [InlineKeyboardButton("🎮 PUBG Mobile UC", callback_data="cat_pubg")],
-            [InlineKeyboardButton("🔥 Free Fire Diamond", callback_data="cat_ff")]
+            [InlineKeyboardButton("🔥 Free Fire Diamond", callback_data="cat_ff")],
+            [InlineKeyboardButton("🕹️ Grand Mobile ID", callback_data="cat_grand")]
         ])
         await query.edit_message_text("🛒 Kerakli bo'limni tanlang:", reply_markup=keyboard)
 
@@ -535,7 +599,7 @@ def main():
     
     app.add_handler(MessageHandler(filters.PHOTO, handle_receipt_photo))
 
-    app.add_handler(CallbackQueryHandler(category_callback, pattern="^cat_"))
+    app.add_handler(CallbackQueryHandler(category_callback, pattern="^(cat_|grand_)"))
     app.add_handler(CallbackQueryHandler(process_buy, pattern="^buy_"))
     app.add_handler(CallbackQueryHandler(admin_order_action, pattern="^adm_"))
 
