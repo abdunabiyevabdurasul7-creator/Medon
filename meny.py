@@ -8,7 +8,7 @@ from telegram.ext import (
 )
 
 # --- SOZLAMALAR ---
-BOT_TOKEN = "8929604110:AAH4CgYjTdAu-W7kJBB778WATll2Z19dDRM"
+BOT_TOKEN = "8929604110:AAEQI3eLL7fZdTZfx_KugpOc7-iWPKohyVU"
 ADMIN_ID = 5692925792  # Admin Telegram ID
 
 # Database Sozlash
