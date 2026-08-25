@@ -8,7 +8,7 @@ from telegram.ext import (
 )
 
 # --- SOZLAMALAR ---
-BOT_TOKEN = "8611684086:AAHiEjf0ZqhbiaM-SlTnhNBgNprDgQJGwPU"
+BOT_TOKEN = "8611684086:AAF6s5vuDalJqp6NY5-di-uKVnYaxkBukgw"
 ADMIN_ID = 5692925792  # Admin Telegram ID
 
 # Database Sozlash
@@ -128,7 +128,14 @@ async def handle_receipt_photo(update: Update, context: ContextTypes.DEFAULT_TYP
     photo_id = update.message.photo[-1].file_id
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    amount = context.user_data.get('top_up_amount', 0)
+    amount = context.user_data.get('top_up_amount')
+    if amount is None or amount <= 0:
+        await update.message.reply_text(
+            "❌ Avval «💳 Balans to'ldirish» bo'limidan summa kiriting, "
+            "keyin chekni yuboring.",
+            reply_markup=main_keyboard()
+        )
+        return
 
     cursor.execute("INSERT INTO payments (user_id, amount, status, created_at) VALUES (?, ?, 'Kutilmoqda', ?)", (user_id, amount, current_time))
     conn.commit()
@@ -161,25 +168,82 @@ async def handle_receipt_photo(update: Update, context: ContextTypes.DEFAULT_TYP
 # --- ADMIN CHEK ORQALI BALANS QO'SHISH ---
 async def approve_payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
-    
-    data = query.data.split("_")
-    target_user_id = data[2]
-    payment_id = data[3] if len(data) > 3 else None
 
-    context.user_data['waiting_for_balance_user'] = target_user_id
-    context.user_data['waiting_for_payment_id'] = payment_id
-    
+    if query.from_user.id != ADMIN_ID:
+        await query.answer("❌ Faqat Admin.", show_alert=True)
+        return
+
+    await query.answer()
+
+    data = query.data.split("_")
+    if len(data) != 4:
+        await query.answer("❌ To'lov ma'lumotlari noto'g'ri.", show_alert=True)
+        return
+
+    try:
+        target_user_id = int(data[2])
+        payment_id = int(data[3])
+    except ValueError:
+        await query.answer("❌ To'lov ID noto'g'ri.", show_alert=True)
+        return
+
+    cursor.execute(
+        "SELECT amount, status FROM payments WHERE payment_id = ? AND user_id = ?",
+        (payment_id, target_user_id)
+    )
+    payment = cursor.fetchone()
+
+    if not payment:
+        await query.answer("❌ To'lov topilmadi.", show_alert=True)
+        return
+
+    amount, status = payment
+
+    if status != "Kutilmoqda":
+        await query.answer(f"⚠️ To'lov allaqachon: {status}", show_alert=True)
+        return
+
+    if amount <= 0:
+        await query.answer("❌ To'lov summasi noto'g'ri.", show_alert=True)
+        return
+
+    cursor.execute(
+        "UPDATE users SET balance = balance + ? WHERE user_id = ?",
+        (amount, target_user_id)
+    )
+    cursor.execute(
+        "UPDATE payments SET status = 'Tasdiqlandi' WHERE payment_id = ?",
+        (payment_id,)
+    )
+    conn.commit()
+
     try:
         await query.edit_message_reply_markup(reply_markup=None)
     except Exception:
         pass
-        
-    await query.message.reply_text(f"💳 ID: {target_user_id} foydalanuvchisining balansiga qancha pul qo'shmoqchisiz (so'mda)?\n\n*(Faqat raqam yuboring)*")
+
+    await query.message.reply_text(
+        f"✅ To'lov #{payment_id} tasdiqlandi.\n"
+        f"👤 User ID: {target_user_id}\n"
+        f"💰 Balansga {amount:,.0f} so'm qo'shildi."
+    )
+
+    try:
+        await context.bot.send_message(
+            target_user_id,
+            f"🎉 To'lovingiz tasdiqlandi!\n"
+            f"💰 Balansingizga {amount:,.0f} so'm qo'shildi."
+        )
+    except Exception:
+        pass
+
 
 # --- ADMIN CHEKNI BEKOR QILISH ---
 async def reject_payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    if query.from_user.id != ADMIN_ID:
+        await query.answer("❌ Faqat Admin.", show_alert=True)
+        return
     await query.answer()
     
     data = query.data.split("_")
@@ -545,6 +609,7 @@ async def category_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("TG Premium 3 Oy — 178,000 so'm", callback_data="buy_TG Premium 3 Oy_178000")],
             [InlineKeyboardButton("TG Premium 6 Oy — 246,000 so'm", callback_data="buy_TG Premium 6 Oy_246000")],
             [InlineKeyboardButton("TG Premium 12 Oy — 440,000 so'm", callback_data="buy_TG Premium 12 Oy_440000")],
+            [InlineKeyboardButton("TG Premium 1 Oy — 45,000 so'm", callback_data="buy_TG Premium 12 Oy_45000")],
             [InlineKeyboardButton("TG Akkaunt — 8,000 so'm", callback_data="buy_TG Akkaunt_8000")],
             [InlineKeyboardButton("🔙 Orqaga", callback_data="cat_back")]
         ])
@@ -618,7 +683,7 @@ async def category_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data == "grand_4x":
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("60 GC — 3,800 so'm", callback_data="buy_Grand 4x 60 GC_4500")],
+            [InlineKeyboardButton("60 GC — 4,500 so'm", callback_data="buy_Grand 4x 60 GC_4500")],
             [InlineKeyboardButton("120 GC — 6,200 so'm", callback_data="buy_Grand 4x 120 GC_6200")],
             [InlineKeyboardButton("360 GC — 16,200 so'm", callback_data="buy_Grand 4x 360 GC_16500")],
             [InlineKeyboardButton("800 GC — 34,500 so'm", callback_data="buy_Grand 4x 800 GC_34500")],
@@ -665,6 +730,9 @@ async def category_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("🛒 Kerakli bo'limni tanlang:", reply_markup=keyboard)
 
     elif query.data == "admin_payments_history":
+        if query.from_user.id != ADMIN_ID:
+            await query.answer("❌ Bu bo'lim faqat Admin uchun.", show_alert=True)
+            return
         cursor.execute("SELECT payment_id, user_id, amount, status, created_at FROM payments ORDER BY payment_id DESC LIMIT 10")
         payments = cursor.fetchall()
         msg = "📜 **Oxirgi to'lovlar tarixi:**\n\n"
@@ -711,6 +779,9 @@ async def process_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- ADMIN BUYURTMANI TASDIQLASHI ---
 async def admin_order_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    if query.from_user.id != ADMIN_ID:
+        await query.answer("❌ Faqat Admin.", show_alert=True)
+        return
     await query.answer()
     _, action, order_id = query.data.split("_")
     order_id = int(order_id)
