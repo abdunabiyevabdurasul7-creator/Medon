@@ -644,7 +644,7 @@ async def category_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data == "grand_normal":
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("15 GC — 3,500 so'm", callback_data="buy_Grand 15 GC_3500")],
+            [InlineKeyboardButton("15 GC — 3,000 so'm", callback_data="buy_Grand 15 GC_3500")],
             [InlineKeyboardButton("30 GC — 5,000 so'm", callback_data="buy_Grand 30 GC_5000")],
             [InlineKeyboardButton("90 GC — 15,500 so'm", callback_data="buy_Grand 90 GC_15500")],
             [InlineKeyboardButton("200 GC — 34,000 so'm", callback_data="buy_Grand 200 GC_34000")],
