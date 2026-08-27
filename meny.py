@@ -609,7 +609,7 @@ async def category_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("TG Premium 3 Oy — 178,000 so'm", callback_data="buy_TG Premium 3 Oy_178000")],
             [InlineKeyboardButton("TG Premium 6 Oy — 246,000 so'm", callback_data="buy_TG Premium 6 Oy_246000")],
             [InlineKeyboardButton("TG Premium 12 Oy — 440,000 so'm", callback_data="buy_TG Premium 12 Oy_440000")],
-            [InlineKeyboardButton("TG Premium 1 Oy — 45,000 so'm", callback_data="buy_TG Premium 12 Oy_45000")],
+            [InlineKeyboardButton("TG Premium 1 Oy — 50,000 so'm", callback_data="buy_TG Premium 12 Oy_45000")],
             [InlineKeyboardButton("TG Akkaunt — 8,000 so'm", callback_data="buy_TG Akkaunt_8000")],
             [InlineKeyboardButton("🔙 Orqaga", callback_data="cat_back")]
         ])
