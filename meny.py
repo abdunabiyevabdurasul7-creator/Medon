@@ -237,7 +237,6 @@ async def approve_payment_callback(update: Update, context: ContextTypes.DEFAULT
     except Exception:
         pass
 
-
 # --- ADMIN CHEKNI BEKOR QILISH ---
 async def reject_payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -659,13 +658,6 @@ async def category_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("🔥 Free Fire Diamond paketlari:", reply_markup=keyboard)
 
     elif query.data == "cat_grand":
-        keyboard = InlineKeyboardMarkup(
-            [InlineKeyboardButton("📱 Grand Oddiy Tariflar", callback_data="grand_normal")],
-            [InlineKeyboardButton("🔙 Orqaga", callback_data="cat_back")]
-        ])
-        await query.edit_message_text("🕹️ Grand Mobile GC paketlari:", reply_markup=keyboard)
-    
-    elif query.data == "grand_normal":
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("15 GC — 2,520 so'm", callback_data="buy_Grand 15 GC_3500")],
             [InlineKeyboardButton("30 GC — 5,040 so'm", callback_data="buy_Grand 30 GC_5000")],
@@ -674,9 +666,9 @@ async def category_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("500 GC — 84,000 so'm", callback_data="buy_Grand 500 GC_85000")],
             [InlineKeyboardButton("1000 GC — 168,000 so'm", callback_data="buy_Grand 1000 GC_169000")],
             [InlineKeyboardButton("2500 GC — 421,000 so'm", callback_data="buy_Grand 2500 GC_422000")],
-            [InlineKeyboardButton("🔙 Orqaga", callback_data="cat_grand")]
+            [InlineKeyboardButton("🔙 Orqaga", callback_data="cat_back")]
         ])
-        await query.edit_message_text("🕹️ Grand Mobile oddiy GC paketlari:", reply_markup=keyboard)
+        await query.edit_message_text("🕹️ Grand Mobile GC paketlari:", reply_markup=keyboard)
 
     elif query.data == "cat_back":
         keyboard = InlineKeyboardMarkup([
@@ -815,7 +807,7 @@ def main():
     
     app.add_handler(MessageHandler(filters.PHOTO, handle_receipt_photo))
 
-    app.add_handler(CallbackQueryHandler(category_callback, pattern="^(cat_|grand_|admin_payments_history)"))
+    app.add_handler(CallbackQueryHandler(category_callback, pattern="^(cat_|admin_payments_history)"))
     app.add_handler(CallbackQueryHandler(process_buy, pattern="^buy_"))
     app.add_handler(CallbackQueryHandler(admin_order_action, pattern="^adm_"))
     app.add_handler(CallbackQueryHandler(approve_payment_callback, pattern="^pay_approve_"))
