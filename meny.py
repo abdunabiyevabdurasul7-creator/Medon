@@ -659,63 +659,21 @@ async def category_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("🔥 Free Fire Diamond paketlari:", reply_markup=keyboard)
 
     elif query.data == "cat_grand":
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔥 Grand 5x Tariflar", callback_data="grand_5x")],
-            [InlineKeyboardButton("💎 Grand 4x Tariflar", callback_data="grand_4x")],
-            [InlineKeyboardButton("💰 Grand 3x Tariflar", callback_data="grand_3x")],
+        keyboard = InlineKeyboardMarkup(
             [InlineKeyboardButton("📱 Grand Oddiy Tariflar", callback_data="grand_normal")],
             [InlineKeyboardButton("🔙 Orqaga", callback_data="cat_back")]
         ])
         await query.edit_message_text("🕹️ Grand Mobile GC paketlari:", reply_markup=keyboard)
-
-    elif query.data == "grand_5x":
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("75 Gc — 4,000 so'm", callback_data="buy_Grand 5x 75 Gc_4000")],
-            [InlineKeyboardButton("150 Gc — 6,500 so'm", callback_data="buy_Grand 5x 150 Gc_6500")],
-            [InlineKeyboardButton("450 Gc — 16,500 so'm", callback_data="buy_Grand 5x 450 Gc_16500")],
-            [InlineKeyboardButton("1000 Gc — 35,000 so'm", callback_data="buy_Grand 5x 1000 Gc_35000")],
-            [InlineKeyboardButton("2525 Gc — 86,000 so'm", callback_data="buy_Grand 5x 2525 Gc_86000")],
-            [InlineKeyboardButton("5100 Gc — 171,000 so'm", callback_data="buy_Grand 5x 5100 Gc_171000")],
-            [InlineKeyboardButton("12875 Gc — 424,000 so'm", callback_data="buy_Grand 5x 12875 Gc_424000")],
-            [InlineKeyboardButton("🔙 Orqaga", callback_data="cat_grand")]
-        ])
-        await query.edit_message_text("🕹️ Grand Mobile 5x GC paketlari:", reply_markup=keyboard)
-
-    elif query.data == "grand_4x":
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("60 GC — 4,500 so'm", callback_data="buy_Grand 4x 60 GC_4500")],
-            [InlineKeyboardButton("120 GC — 6,200 so'm", callback_data="buy_Grand 4x 120 GC_6200")],
-            [InlineKeyboardButton("360 GC — 16,200 so'm", callback_data="buy_Grand 4x 360 GC_16500")],
-            [InlineKeyboardButton("800 GC — 34,500 so'm", callback_data="buy_Grand 4x 800 GC_34500")],
-            [InlineKeyboardButton("2025 GC — 85,500 so'm", callback_data="buy_Grand 4x 2025 GC_85500")],
-            [InlineKeyboardButton("4100 GC — 170,500 so'm", callback_data="buy_Grand 4x 4100 GC_170500")],
-            [InlineKeyboardButton("10375 GC — 423,500 so'm", callback_data="buy_Grand 4x 10375 GC_423500")],
-            [InlineKeyboardButton("🔙 Orqaga", callback_data="cat_grand")]
-        ])
-        await query.edit_message_text("🕹️ Grand Mobile 4x GC paketlari:", reply_markup=keyboard)
-
-    elif query.data == "grand_3x":
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("45 GC — 3,500 so'm", callback_data="buy_Grand 3x 45 GC_3500")],
-            [InlineKeyboardButton("90 GC — 6,000 so'm", callback_data="buy_Grand 3x 90 GC_6000")],
-            [InlineKeyboardButton("270 GC — 16,000 so'm", callback_data="buy_Grand 3x 270 GC_16000")],
-            [InlineKeyboardButton("600 GC — 34,000 so'm", callback_data="buy_Grand 3x 600 GC_34000")],
-            [InlineKeyboardButton("1525 GC — 85,000 so'm", callback_data="buy_Grand 3x 1525 GC_85000")],
-            [InlineKeyboardButton("3100 GC — 170,000 so'm", callback_data="buy_Grand 3x 3100 GC_170000")],
-            [InlineKeyboardButton("7875 GC — 423,000 so'm", callback_data="buy_Grand 3x 7875 GC_423000")],
-            [InlineKeyboardButton("🔙 Orqaga", callback_data="cat_grand")]
-        ])
-        await query.edit_message_text("🕹️ Grand Mobile 3x GC paketlari:", reply_markup=keyboard)
-
+    
     elif query.data == "grand_normal":
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("15 GC — 3,000 so'm", callback_data="buy_Grand 15 GC_3500")],
-            [InlineKeyboardButton("30 GC — 5,000 so'm", callback_data="buy_Grand 30 GC_5000")],
-            [InlineKeyboardButton("90 GC — 15,500 so'm", callback_data="buy_Grand 90 GC_15500")],
-            [InlineKeyboardButton("200 GC — 34,000 so'm", callback_data="buy_Grand 200 GC_34000")],
-            [InlineKeyboardButton("500 GC — 85,000 so'm", callback_data="buy_Grand 500 GC_85000")],
-            [InlineKeyboardButton("1000 GC — 169,000 so'm", callback_data="buy_Grand 1000 GC_169000")],
-            [InlineKeyboardButton("2500 GC — 422,000 so'm", callback_data="buy_Grand 2500 GC_422000")],
+            [InlineKeyboardButton("15 GC — 2,520 so'm", callback_data="buy_Grand 15 GC_3500")],
+            [InlineKeyboardButton("30 GC — 5,040 so'm", callback_data="buy_Grand 30 GC_5000")],
+            [InlineKeyboardButton("90 GC — 15,120 so'm", callback_data="buy_Grand 90 GC_15500")],
+            [InlineKeyboardButton("200 GC — 33,600 so'm", callback_data="buy_Grand 200 GC_34000")],
+            [InlineKeyboardButton("500 GC — 84,000 so'm", callback_data="buy_Grand 500 GC_85000")],
+            [InlineKeyboardButton("1000 GC — 168,000 so'm", callback_data="buy_Grand 1000 GC_169000")],
+            [InlineKeyboardButton("2500 GC — 421,000 so'm", callback_data="buy_Grand 2500 GC_422000")],
             [InlineKeyboardButton("🔙 Orqaga", callback_data="cat_grand")]
         ])
         await query.edit_message_text("🕹️ Grand Mobile oddiy GC paketlari:", reply_markup=keyboard)
