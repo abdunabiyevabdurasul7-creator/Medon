@@ -1,901 +1,2676 @@
-import logging
 import sqlite3
+import logging
+import uuid
+import json
+from decimal import Decimal, InvalidOperation
 from datetime import datetime
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
+
+import requests
+
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
 from telegram.ext import (
-    Application, CommandHandler, MessageHandler, CallbackQueryHandler,
-    ContextTypes, ConversationHandler, filters
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
 )
 
-# --- SOZLAMALAR ---
+# =========================================================
+# SOZLAMALAR
+# =========================================================
+
 BOT_TOKEN = "8611684086:AAF3lCOhLqV3B7Hi_klpmeTQcZMN6hjtKX0"
-ADMIN_ID = 5692925792  # Admin Telegram ID
 
-# Database Sozlash
-conn = sqlite3.connect('bot_database.db', check_same_thread=False)
-cursor = conn.cursor()
+ADMIN_ID = 5692925792
 
-cursor.execute('''
-CREATE TABLE IF NOT EXISTS users (
-    user_id INTEGER PRIMARY KEY,
-    balance REAL DEFAULT 0
-)''')
+FAZER_API_KEY = "fc_e2a3d96eda3c7f0bd6b4a139"
 
-cursor.execute('''
-CREATE TABLE IF NOT EXISTS orders (
-    order_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
-    item_name TEXT,
-    price REAL,
-    status TEXT DEFAULT 'Kutilmoqda'
-)''')
+FAZER_BASE = "https://api.fzr.cards/api/v2"
 
-cursor.execute('''
-CREATE TABLE IF NOT EXISTS promocodes (
-    code TEXT PRIMARY KEY,
-    amount REAL,
-    limit_count INTEGER,
-    used_count INTEGER DEFAULT 0
-)''')
+# 1 USD = qancha so'm
+USD_UZS = Decimal("11800")
 
-cursor.execute('''
-CREATE TABLE IF NOT EXISTS promo_uses (
-    user_id INTEGER,
-    code TEXT,
-    PRIMARY KEY (user_id, code)
-)''')
+# Barcha o'yinlarga 20% ustama
+MARKUP_PERCENT = Decimal("20")
 
-# --- TO'LOVLAR JADVALI ---
-cursor.execute('''
-CREATE TABLE IF NOT EXISTS payments (
-    payment_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
-    amount REAL DEFAULT 0,
-    status TEXT DEFAULT 'Kutilmoqda',
-    created_at TEXT
-)''')
-conn.commit()
+DB = "bot.db"
 
-# --- STEP CONSTANTS ---
-(
-    PROMO_CODE, PROMO_AMOUNT, PROMO_LIMIT, 
-    USE_PROMO, CHECK_ORDER, 
-    TRANSFER_USER, TRANSFER_AMOUNT, 
-    MANUAL_ADD_USER, MANUAL_ADD_AMOUNT,
-    MANUAL_SUB_USER, MANUAL_SUB_AMOUNT,
-    POST_MESSAGE, TOP_UP_AMOUNT
-) = range(13)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s"
+)
 
-# --- ASOSIY MENYU ---
-def main_keyboard():
-    return ReplyKeyboardMarkup([
-        ["🛍️ Buyurtma berish", "💳 Balans to'ldirish"],
-        ["💸 Pul o'tkazish", "🔍 Buyurtmani tekshirish"],
-        ["🎁 Promokod", "👤 Balans va Profil"],
-        ["📊 Statistika"]
-    ], resize_keyboard=True)
+log = logging.getLogger(__name__)
 
-# --- BEKOR QILISH TUGMASI UCHUN KLAVIATURA ---
-def cancel_keyboard():
-    return ReplyKeyboardMarkup([
-        ["❌ Bekor qilish"]
-    ], resize_keyboard=True)
 
-# --- START COMMAND ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    cursor.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
-    conn.commit()
-    await update.message.reply_text("Xush kelibsiz! Kerakli bo'limni tanlang:", reply_markup=main_keyboard())
+# =========================================================
+# DATABASE
+# =========================================================
 
-# --- BALANS TO'LDIRISH (1-QADAM: Summani so'rash) ---
-async def fill_balance_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "💳 Balansni to'ldirish uchun qancha summa kiritmoqchisiz?\n\n"
-        "*(Faqat raqamlarda kiriting, masalan: 15000)*",
-        reply_markup=cancel_keyboard()
+def conn():
+    c = sqlite3.connect(DB)
+    c.row_factory = sqlite3.Row
+    return c
+
+
+def init_db():
+    c = conn()
+
+    c.executescript("""
+    CREATE TABLE IF NOT EXISTS users(
+        user_id INTEGER PRIMARY KEY,
+        username TEXT DEFAULT '',
+        first_name TEXT DEFAULT '',
+        balance REAL DEFAULT 0,
+        created_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS payments(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        amount REAL,
+        photo_id TEXT,
+        status TEXT DEFAULT 'pending',
+        created_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS products(
+        category_id TEXT,
+        offer_id TEXT,
+        game_name TEXT,
+        offer_name TEXT,
+        price_usd REAL DEFAULT 0,
+        sale_price REAL,
+        active INTEGER DEFAULT 1,
+        updated_at TEXT,
+        PRIMARY KEY(category_id, offer_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS orders(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        fazer_order_id TEXT,
+        category_id TEXT,
+        offer_id TEXT,
+        product_name TEXT,
+        fields_json TEXT,
+        cost_usd REAL,
+        sale_price REAL,
+        status TEXT,
+        created_at TEXT,
+        notified TEXT DEFAULT '0'
+    );
+
+    CREATE TABLE IF NOT EXISTS promo_codes(
+        code TEXT PRIMARY KEY,
+        percent REAL,
+        max_uses INTEGER DEFAULT 0,
+        used INTEGER DEFAULT 0,
+        active INTEGER DEFAULT 1
+    );
+
+    CREATE TABLE IF NOT EXISTS promo_users(
+        user_id INTEGER,
+        code TEXT,
+        PRIMARY KEY(user_id, code)
+    );
+    """)
+
+    c.commit()
+    c.close()
+
+
+def ensure_user(user):
+    c = conn()
+
+    c.execute(
+        """
+        INSERT OR IGNORE INTO users
+        (user_id, username, first_name, created_at)
+        VALUES (?, ?, ?, ?)
+        """,
+        (
+            user.id,
+            user.username or "",
+            user.first_name or "",
+            datetime.now().isoformat()
+        )
     )
-    return TOP_UP_AMOUNT
 
-# --- BALANS TO'LDIRISH (2-QADAM: Karta va chekni so'rash) ---
-async def fill_balance_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    c.execute(
+        """
+        UPDATE users
+        SET username=?, first_name=?
+        WHERE user_id=?
+        """,
+        (
+            user.username or "",
+            user.first_name or "",
+            user.id
+        )
+    )
+
+    c.commit()
+    c.close()
+
+
+def get_balance(uid):
+    c = conn()
+
+    r = c.execute(
+        "SELECT balance FROM users WHERE user_id=?",
+        (uid,)
+    ).fetchone()
+
+    c.close()
+
+    if not r:
+        return Decimal("0")
+
+    return Decimal(str(r["balance"] or 0))
+
+
+def add_balance(uid, amount):
+    c = conn()
+
+    c.execute(
+        """
+        UPDATE users
+        SET balance = balance + ?
+        WHERE user_id=?
+        """,
+        (float(amount), uid)
+    )
+
+    c.commit()
+    c.close()
+
+
+# =========================================================
+# FAZERCARDS API
+# =========================================================
+
+def headers():
+    return {
+        "X-API-Key": FAZER_API_KEY,
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+
+
+def api_get(path, params=None):
     try:
-        amount = float(update.message.text)
-        if amount <= 0:
-            await update.message.reply_text("❌ Noto'g'ri summa kiritildi. Qaytadan kiriting:", reply_markup=cancel_keyboard())
-            return TOP_UP_AMOUNT
-
-        context.user_data['top_up_amount'] = amount
-        user_id = update.effective_user.id
-
-        text = (
-            f"💳 Kiritilgan summa: **{amount:,.0f} so'm**\n\n"
-            "1. Quyidagi karta raqamiga to'lov qiling:\n"
-            "<code>9860 6067 6078 9275</code> (A.Abdurasul)\n\n"
-            "2. To'lov qilgach, to'lov cheki (skrinshot) rasmini shu botning o'ziga yuboring!\n\n"
-            f"🆔 Sizning ID: <code>{user_id}</code>"
+        r = requests.get(
+            FAZER_BASE + path,
+            headers=headers(),
+            params=params,
+            timeout=30
         )
-        await update.message.reply_text(text, parse_mode="HTML", reply_markup=main_keyboard())
-        return ConversationHandler.END
 
-    except ValueError:
-        await update.message.reply_text("❌ Faqat raqam ko'rinishida kiriting:", reply_markup=cancel_keyboard())
-        return TOP_UP_AMOUNT
+        try:
+            data = r.json()
+        except Exception:
+            data = {
+                "ok": False,
+                "error": r.text
+            }
 
-# --- CHEK RASMINI TUTIB OLISH VA ADMINGA YUBORISH ---
-async def handle_receipt_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    photo_id = update.message.photo[-1].file_id
-    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        return r.status_code, data
 
-    amount = context.user_data.get('top_up_amount')
-    if amount is None or amount <= 0:
-        await update.message.reply_text(
-            "❌ Avval «💳 Balans to'ldirish» bo'limidan summa kiriting, "
-            "keyin chekni yuboring.",
-            reply_markup=main_keyboard()
+    except Exception as e:
+        log.error("GET API xato: %s", e)
+
+        return 0, {
+            "ok": False,
+            "error": str(e)
+        }
+
+
+def api_post(path, body):
+    try:
+        h = {
+            **headers(),
+            "Idempotency-Key": str(uuid.uuid4())
+        }
+
+        r = requests.post(
+            FAZER_BASE + path,
+            headers=h,
+            json=body,
+            timeout=30
         )
-        return
 
-    cursor.execute("INSERT INTO payments (user_id, amount, status, created_at) VALUES (?, ?, 'Kutilmoqda', ?)", (user_id, amount, current_time))
-    conn.commit()
-    payment_id = cursor.lastrowid
+        try:
+            data = r.json()
+        except Exception:
+            data = {
+                "ok": False,
+                "error": r.text
+            }
 
-    context.user_data.pop('top_up_amount', None)
+        return r.status_code, data
 
-    await update.message.reply_text("✅ Chek qabul qilindi! Admin ko'rib chiqqach, balansingiz to'ldiriladi.", reply_markup=main_keyboard())
+    except Exception as e:
+        log.error("POST API xato: %s", e)
 
-    admin_keyboard = InlineKeyboardMarkup([
+        return 0, {
+            "ok": False,
+            "error": str(e)
+        }
+
+
+# =========================================================
+# KATEGORIYALAR
+# =========================================================
+
+def get_all_categories():
+
+    all_items = []
+    cursor = None
+
+    max_pages = 100
+
+    for _ in range(max_pages):
+
+        params = {
+            "limit": 50
+        }
+
+        if cursor:
+            params["cursor"] = cursor
+
+        status, data = api_get(
+            "/topups",
+            params
+        )
+
+        if status != 200 or not data.get("ok"):
+            log.error(
+                "Kategoriyalar API xatosi: %s",
+                data
+            )
+            break
+
+        items = data.get(
+            "items",
+            []
+        )
+
+        all_items.extend(items)
+
+        meta = data.get(
+            "meta",
+            {}
+        )
+
+        next_cursor = meta.get(
+            "next_cursor"
+        )
+
+        has_more = meta.get(
+            "has_more",
+            False
+        )
+
+        if not has_more or not next_cursor:
+            break
+
+        if next_cursor == cursor:
+            break
+
+        cursor = next_cursor
+
+    result = []
+    seen = set()
+
+    for item in all_items:
+
+        cid = item.get(
+            "category_id"
+        )
+
+        if not cid:
+            continue
+
+        if cid in seen:
+            continue
+
+        seen.add(cid)
+        result.append(item)
+
+    return result
+
+
+def find_game_categories(categories):
+
+    priority = [
+        "pubg",
+        "free fire",
+        "roblox",
+    ]
+
+    def score(item):
+
+        name = str(
+            item.get("name", "")
+        ).lower()
+
+        for i, word in enumerate(priority):
+
+            if word in name:
+                return i
+
+        return 100
+
+    return sorted(
+        categories,
+        key=score
+    )
+
+
+# =========================================================
+# OFFERS
+# =========================================================
+
+def get_offers(cid):
+
+    status, data = api_get(
+        "/topups/offers",
+        {
+            "category_id": cid
+        }
+    )
+
+    if status != 200:
+        return None
+
+    if not data.get("ok"):
+        return None
+
+    return data
+
+
+# =========================================================
+# PRICE
+# =========================================================
+
+def local_price(cid, oid, usd):
+
+    usd = Decimal(str(usd))
+
+    # API USD narxini so'mga aylantirish
+    base_price = usd * USD_UZS
+
+    # 20% ustama
+    return base_price * Decimal("1.20")
+
+
+def save_product(
+    cid,
+    oid,
+    gname,
+    oname,
+    usd
+):
+
+    price = local_price(
+        cid,
+        oid,
+        usd
+    )
+
+    c = conn()
+
+    c.execute(
+        """
+        INSERT OR REPLACE INTO products
+        (
+            category_id,
+            offer_id,
+            game_name,
+            offer_name,
+            price_usd,
+            sale_price,
+            active,
+            updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+        """,
+        (
+            cid,
+            oid,
+            gname,
+            oname,
+            float(usd),
+            float(price),
+            datetime.now().isoformat()
+        )
+    )
+
+    c.commit()
+    c.close()
+
+
+# =========================================================
+# MENU
+# =========================================================
+
+def main_menu():
+
+    return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("➕ Balans qo'shish", callback_data=f"pay_approve_{user_id}_{payment_id}"),
-            InlineKeyboardButton("❌ Rad etish", callback_data=f"pay_reject_{payment_id}")
+            InlineKeyboardButton(
+                "🛒 Buyurtma berish",
+                callback_data="games"
+            )
         ],
-        [InlineKeyboardButton("💳 To'lovlar tarixi", callback_data="admin_payments_history")]
+        [
+            InlineKeyboardButton(
+                "💳 Balans to'ldirish",
+                callback_data="deposit"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "📦 Buyurtmalarim",
+                callback_data="orders"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🎁 Promo kod",
+                callback_data="promo"
+            ),
+            InlineKeyboardButton(
+                "👤 Profil",
+                callback_data="profile"
+            )
+        ]
     ])
 
-    username = update.effective_user.username
-    user_mention = f"@{username}" if username else "Yo'q"
-    amount_str = f"{amount:,.0f} so'm" if amount > 0 else "Kiritilmagan"
-    caption_text = f"📥 Yangi to'lov cheki!\n🆔 To'lov ID: #{payment_id}\n👤 Foydalanuvchi ID: {user_id}\n👤 Username: {user_mention}\n💰 Summa: {amount_str}"
+
+# =========================================================
+# BOT MENU'NI O'CHIRISH
+# =========================================================
+
+async def remove_bot_menu(app):
+
+    try:
+
+        await app.bot.set_my_commands([])
+
+        log.info(
+            "Bot command menu tozalandi."
+        )
+
+    except Exception as e:
+
+        log.error(
+            "Bot menu xatosi: %s",
+            e
+        )
+
+
+# =========================================================
+# START
+# =========================================================
+
+async def start(update, context):
+
+    ensure_user(
+        update.effective_user
+    )
+
+    await update.message.reply_text(
+        "Assalomu Aleykum 👋\n\n"
+        "🎮 O'yin donat botiga xush kelibsiz!",
+        reply_markup=main_menu()
+    )
+
+
+# =========================================================
+# GAMES
+# =========================================================
+
+async def games(update, context):
+
+    q = update.callback_query
+
+    categories = get_all_categories()
+
+    if not categories:
+
+        await q.message.reply_text(
+            "❌ O'yinlar olinmadi.\n\n"
+            "Sabablar:\n"
+            "• API key noto'g'ri\n"
+            "• FazerCards katalogi yopiq\n"
+            "• Internet/API ishlamayapti"
+        )
+
+        return
+
+    categories = find_game_categories(
+        categories
+    )
+
+    chunks = [
+        categories[i:i + 50]
+        for i in range(
+            0,
+            len(categories),
+            50
+        )
+    ]
+
+    first = chunks[0] if chunks else []
+
+    kb = []
+
+    for item in first:
+
+        cid = item.get(
+            "category_id"
+        )
+
+        name = item.get(
+            "name",
+            cid
+        )
+
+        if not cid:
+            continue
+
+        kb.append([
+            InlineKeyboardButton(
+                "🎮 " + str(name)[:55],
+                callback_data="g:" + cid
+            )
+        ])
+
+    if len(chunks) > 1:
+
+        kb.append([
+            InlineKeyboardButton(
+                "➡️ Keyingi o'yinlar",
+                callback_data="games2"
+            )
+        ])
+
+        context.user_data[
+            "categories"
+        ] = categories
+
+    await q.message.reply_text(
+        f"🎮 O'yinni tanlang:\n\n"
+        f"Jami mavjud kategoriya: "
+        f"{len(categories)} ta",
+        reply_markup=InlineKeyboardMarkup(kb)
+    )
+
+
+# =========================================================
+# GAME PAGES
+# =========================================================
+
+async def game_page(update, context):
+
+    q = update.callback_query
+
+    try:
+
+        page = int(
+            q.data.replace(
+                "games",
+                ""
+            )
+        )
+
+    except Exception:
+
+        page = 2
+
+    categories = context.user_data.get(
+        "categories"
+    )
+
+    if not categories:
+
+        categories = get_all_categories()
+
+    start_index = (
+        page - 1
+    ) * 50
+
+    items = categories[
+        start_index:start_index + 50
+    ]
+
+    if not items:
+
+        await q.message.reply_text(
+            "❌ Boshqa o'yin topilmadi."
+        )
+
+        return
+
+    kb = []
+
+    for item in items:
+
+        cid = item.get(
+            "category_id"
+        )
+
+        name = item.get(
+            "name",
+            cid
+        )
+
+        if cid:
+
+            kb.append([
+                InlineKeyboardButton(
+                    "🎮 " + str(name)[:55],
+                    callback_data="g:" + cid
+                )
+            ])
+
+    nav = []
+
+    if page > 2:
+
+        nav.append(
+            InlineKeyboardButton(
+                "⬅️",
+                callback_data=f"games{page-1}"
+            )
+        )
+
+    if start_index + 50 < len(categories):
+
+        nav.append(
+            InlineKeyboardButton(
+                "➡️",
+                callback_data=f"games{page+1}"
+            )
+        )
+
+    if nav:
+        kb.append(nav)
+
+    await q.message.reply_text(
+        f"🎮 O'yinlar — {page}-sahifa",
+        reply_markup=InlineKeyboardMarkup(kb)
+    )
+
+
+# =========================================================
+# GAME OFFERS
+# =========================================================
+
+async def game(update, context):
+
+    q = update.callback_query
+
+    cid = q.data[2:]
+
+    data = get_offers(cid)
+
+    if not data:
+
+        await q.message.reply_text(
+            "❌ Bu o'yinning paketlarini "
+            "olib bo'lmadi."
+        )
+
+        return
+
+    game_name = data.get(
+        "name",
+        cid
+    )
+
+    fields = data.get(
+        "fields",
+        []
+    )
+
+    context.user_data[
+        "category_id"
+    ] = cid
+
+    context.user_data[
+        "game_name"
+    ] = game_name
+
+    context.user_data[
+        "fields"
+    ] = fields
+
+    kb = []
+
+    offers = data.get(
+        "offers",
+        []
+    )
+
+    for off in offers:
+
+        oid = off.get(
+            "offer_id"
+        )
+
+        if not oid:
+            continue
+
+        name = off.get(
+            "name",
+            "Paket"
+        )
+
+        usd = Decimal(
+            str(
+                off.get(
+                    "price_usd",
+                    "0"
+                )
+            )
+        )
+
+        save_product(
+            cid,
+            oid,
+            game_name,
+            name,
+            usd
+        )
+
+        price = local_price(
+            cid,
+            oid,
+            usd
+        )
+
+        kb.append([
+            InlineKeyboardButton(
+                f"{name} — "
+                f"{price:,.0f} so'm",
+                callback_data=(
+                    f"o:{cid}:{oid}"
+                )
+            )
+        ])
+
+    if not kb:
+
+        await q.message.reply_text(
+            "❌ Bu o'yinda hozircha "
+            "paket mavjud emas."
+        )
+
+        return
+
+    await q.message.reply_text(
+        f"🎮 {game_name}\n\n"
+        "📦 Paketni tanlang:",
+        reply_markup=InlineKeyboardMarkup(kb)
+    )
+
+
+# =========================================================
+# OFFER
+# =========================================================
+
+async def offer(update, context):
+
+    q = update.callback_query
+
+    parts = q.data.split(
+        ":",
+        2
+    )
+
+    if len(parts) != 3:
+
+        await q.message.reply_text(
+            "❌ Paket ma'lumotida xato."
+        )
+
+        return
+
+    _, cid, oid = parts
+
+    data = get_offers(cid)
+
+    if not data:
+
+        await q.message.reply_text(
+            "❌ API xatosi."
+        )
+
+        return
+
+    off = next(
+        (
+            x
+            for x in data.get(
+                "offers",
+                []
+            )
+            if x.get(
+                "offer_id"
+            ) == oid
+        ),
+        None
+    )
+
+    if not off:
+
+        await q.message.reply_text(
+            "❌ Paket topilmadi."
+        )
+
+        return
+
+    usd = Decimal(
+        str(
+            off.get(
+                "price_usd",
+                "0"
+            )
+        )
+    )
+
+    price = local_price(
+        cid,
+        oid,
+        usd
+    )
+
+    fields = data.get(
+        "fields",
+        []
+    )
+
+    context.user_data.update({
+        "category_id": cid,
+        "offer_id": oid,
+        "offer_name": off.get(
+            "name",
+            "Paket"
+        ),
+        "price": price,
+        "fields": fields,
+        "field_values": {},
+        "input_index": 0,
+        "state": "order_fields",
+        "promo_code": None,
+    })
+
+    await ask_next_field(
+        q.message,
+        context
+    )
+
+
+# =========================================================
+# ASK FIELD
+# =========================================================
+
+async def ask_next_field(
+    message,
+    context
+):
+
+    fields = context.user_data.get(
+        "fields",
+        []
+    )
+
+    index = context.user_data.get(
+        "input_index",
+        0
+    )
+
+    if index >= len(fields):
+
+        await confirm_order(
+            message,
+            context
+        )
+
+        return
+
+    field = fields[index]
+
+    key = field.get(
+        "key",
+        "field"
+    )
+
+    label = field.get(
+        "label",
+        key
+    )
+
+    context.user_data[
+        "state"
+    ] = "order_fields"
+
+    await message.reply_text(
+        f"🎮 {label}\n\n"
+        "👇 Ma'lumotni yuboring:"
+    )
+
+
+# =========================================================
+# CONFIRM ORDER
+# =========================================================
+
+async def confirm_order(
+    message,
+    context
+):
+
+    base_price = Decimal(
+        str(
+            context.user_data[
+                "price"
+            ]
+        )
+    )
+
+    promo = context.user_data.get(
+        "promo_code"
+    )
+
+    discount = Decimal("0")
+
+    if promo:
+
+        c = conn()
+
+        r = c.execute(
+            """
+            SELECT *
+            FROM promo_codes
+            WHERE code=?
+            AND active=1
+            """,
+            (promo,)
+        ).fetchone()
+
+        c.close()
+
+        if r:
+
+            allowed = (
+                r["max_uses"] == 0
+                or r["used"] < r["max_uses"]
+            )
+
+            if allowed:
+
+                discount = (
+                    base_price *
+                    Decimal(
+                        str(r["percent"])
+                    ) /
+                    Decimal("100")
+                )
+
+    final_price = max(
+        Decimal("0"),
+        base_price - discount
+    )
+
+    context.user_data[
+        "final_price"
+    ] = final_price
+
+    values = context.user_data.get(
+        "field_values",
+        {}
+    )
+
+    lines = ""
+
+    for key, value in values.items():
+
+        lines += (
+            f"• {key}: {value}\n"
+        )
+
+    discount_text = ""
+
+    if discount > 0:
+
+        discount_text = (
+            f"🎁 Chegirma: "
+            f"{discount:,.0f} so'm\n"
+        )
+
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "✅ Tasdiqlash",
+                callback_data="confirm"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "❌ Bekor qilish",
+                callback_data="cancel"
+            )
+        ]
+    ])
+
+    await message.reply_text(
+        f"📦 {context.user_data['offer_name']}\n\n"
+        f"💰 Narx: "
+        f"{base_price:,.0f} so'm\n"
+        f"{discount_text}"
+        f"💵 Jami: "
+        f"{final_price:,.0f} so'm\n\n"
+        f"{lines}\n"
+        "Buyurtmani tasdiqlaysizmi?",
+        reply_markup=kb
+    )
+
+
+# =========================================================
+# CONFIRM
+# =========================================================
+
+async def confirm(update, context):
+
+    q = update.callback_query
+
+    uid = q.from_user.id
+
+    price = Decimal(
+        str(
+            context.user_data.get(
+                "final_price",
+                0
+            )
+        )
+    )
+
+    current_balance = get_balance(uid)
+
+    if current_balance < price:
+
+        await q.message.reply_text(
+            "❌ Balans yetarli emas.\n\n"
+            f"💰 Balans: "
+            f"{current_balance:,.0f} so'm\n"
+            f"💵 Kerak: "
+            f"{price:,.0f} so'm\n\n"
+            "💳 Avval balansni to'ldiring."
+        )
+
+        return
+
+    cid = context.user_data.get(
+        "category_id"
+    )
+
+    oid = context.user_data.get(
+        "offer_id"
+    )
+
+    fields = context.user_data.get(
+        "field_values",
+        {}
+    )
+
+    body = {
+        "category_id": cid,
+        "offer_id": oid,
+        "fields": fields
+    }
+
+    status_code, data = api_post(
+        "/topups/order",
+        body
+    )
+
+    if status_code not in (
+        200,
+        201
+    ) or not data.get("ok"):
+
+        await q.message.reply_text(
+            "❌ Buyurtma yuborilmadi.\n\n"
+            + str(
+                data.get(
+                    "error",
+                    "FazerCards API xatosi"
+                )
+            )
+        )
+
+        return
+
+    order = data.get(
+        "order",
+        {}
+    )
+
+    fazer_id = order.get(
+        "id",
+        ""
+    )
+
+    order_status = order.get(
+        "status",
+        "processing"
+    )
+
+    add_balance(
+        uid,
+        -price
+    )
+
+    c = conn()
+
+    c.execute(
+        """
+        INSERT INTO orders
+        (
+            user_id,
+            fazer_order_id,
+            category_id,
+            offer_id,
+            product_name,
+            fields_json,
+            cost_usd,
+            sale_price,
+            status,
+            created_at,
+            notified
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            uid,
+            fazer_id,
+            cid,
+            oid,
+            context.user_data.get(
+                "offer_name",
+                "Paket"
+            ),
+            json.dumps(
+                fields,
+                ensure_ascii=False
+            ),
+            0,
+            float(price),
+            order_status,
+            datetime.now().isoformat(),
+            "0"
+        )
+    )
+
+    c.commit()
+    c.close()
+
+    promo = context.user_data.get(
+        "promo_code"
+    )
+
+    if promo:
+
+        c = conn()
+
+        c.execute(
+            """
+            INSERT OR IGNORE INTO promo_users
+            (user_id, code)
+            VALUES (?, ?)
+            """,
+            (
+                uid,
+                promo
+            )
+        )
+
+        c.execute(
+            """
+            UPDATE promo_codes
+            SET used=used+1
+            WHERE code=?
+            """,
+            (promo,)
+        )
+
+        c.commit()
+        c.close()
+
+    await q.message.reply_text(
+        "✅ BUYURTMA YUBORILDI!\n\n"
+        f"🎮 {context.user_data.get('game_name', '')}\n"
+        f"📦 {context.user_data.get('offer_name', '')}\n"
+        f"💰 {price:,.0f} so'm\n"
+        f"🆔 {fazer_id}\n"
+        f"📊 Status: {order_status}"
+    )
+
+    try:
+
+        await context.bot.send_message(
+            ADMIN_ID,
+            "🛒 YANGI BUYURTMA\n\n"
+            f"👤 User: {uid}\n"
+            f"🎮 {context.user_data.get('game_name', '')}\n"
+            f"📦 {context.user_data.get('offer_name', '')}\n"
+            f"💰 {price:,.0f} so'm\n"
+            f"🆔 Fazer ID: {fazer_id}\n"
+            f"📊 {order_status}"
+        )
+
+    except Exception as e:
+
+        log.error(
+            "Admin xabarida xato: %s",
+            e
+        )
+
+    context.user_data.clear()
+
+
+# =========================================================
+# CANCEL
+# =========================================================
+
+async def cancel(update, context):
+
+    q = update.callback_query
+
+    context.user_data.clear()
+
+    await q.message.reply_text(
+        "❌ Buyurtma bekor qilindi.",
+        reply_markup=main_menu()
+    )
+
+
+# =========================================================
+# BALANCE
+# =========================================================
+
+async def balance_cb(update, context):
+
+    q = update.callback_query
+
+    uid = q.from_user.id
+
+    await q.message.reply_text(
+        f"💰 Balansingiz:\n\n"
+        f"{get_balance(uid):,.0f} so'm"
+    )
+
+
+# =========================================================
+# DEPOSIT
+# =========================================================
+
+async def deposit(update, context):
+
+    q = update.callback_query
+
+    context.user_data[
+        "state"
+    ] = "deposit_amount"
+
+    await q.message.reply_text(
+        "💳 Balans to'ldirish\n\n"
+        "Qancha summa to'ldirasiz?\n\n"
+        "Masalan:\n"
+        "50000"
+    )
+
+
+# =========================================================
+# PROFILE
+# =========================================================
+
+async def profile(update, context):
+
+    q = update.callback_query
+
+    uid = q.from_user.id
+
+    c = conn()
+
+    row = c.execute(
+        """
+        SELECT COUNT(*) AS n
+        FROM orders
+        WHERE user_id=?
+        """,
+        (uid,)
+    ).fetchone()
+
+    c.close()
+
+    await q.message.reply_text(
+        "👤 PROFIL\n\n"
+        f"🆔 ID: {uid}\n"
+        f"💰 Balans: "
+        f"{get_balance(uid):,.0f} so'm\n"
+        f"📦 Buyurtmalar: {row['n']}"
+    )
+
+
+# =========================================================
+# ORDERS
+# =========================================================
+
+async def orders_cb(update, context):
+
+    q = update.callback_query
+
+    uid = q.from_user.id
+
+    c = conn()
+
+    rows = c.execute(
+        """
+        SELECT *
+        FROM orders
+        WHERE user_id=?
+        ORDER BY id DESC
+        LIMIT 10
+        """,
+        (uid,)
+    ).fetchall()
+
+    c.close()
+
+    if not rows:
+
+        await q.message.reply_text(
+            "📦 Hali buyurtmalar yo'q."
+        )
+
+        return
+
+    text = "📦 OXIRGI BUYURTMALAR\n\n"
+
+    for r in rows:
+
+        text += (
+            f"#{r['id']} "
+            f"{r['product_name']}\n"
+            f"💰 {r['sale_price']:,.0f} so'm\n"
+            f"📊 {r['status']}\n"
+            f"🆔 {r['fazer_order_id']}\n\n"
+        )
+
+    await q.message.reply_text(
+        text
+    )
+
+
+# =========================================================
+# PROMO
+# =========================================================
+
+async def promo_cb(update, context):
+
+    q = update.callback_query
+
+    context.user_data[
+        "state"
+    ] = "promo"
+
+    await q.message.reply_text(
+        "🎁 Promo kodni yuboring:"
+    )
+
+
+# =========================================================
+# TEXT HANDLER
+# =========================================================
+
+async def text_handler(update, context):
+
+    user = update.effective_user
+
+    ensure_user(user)
+
+    text = (
+        update.message.text or ""
+    ).strip()
+
+    state = context.user_data.get(
+        "state"
+    )
+
+    if (
+        user.id == ADMIN_ID
+        and context.user_data.get(
+            "admin_state"
+        )
+    ):
+
+        await admin_text(
+            update,
+            context
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # DEPOSIT
+    # -----------------------------------------------------
+
+    if state == "deposit_amount":
+
+        try:
+
+            amount = Decimal(
+                text.replace(",", "")
+                .replace(" ", "")
+            )
+
+        except InvalidOperation:
+
+            await update.message.reply_text(
+                "❌ Summani raqamda yuboring."
+            )
+
+            return
+
+        if amount <= 0:
+
+            await update.message.reply_text(
+                "❌ Summa 0 dan katta bo'lishi kerak."
+            )
+
+            return
+
+        context.user_data.update({
+            "state": "waiting_receipt",
+            "deposit_amount": float(amount)
+        })
+
+        await update.message.reply_text(
+            f"💳 {amount:,.0f} so'm to'lang.\n\n"
+            "9860 6067 6078 9275 A.Abdurasul "
+            "amalga oshiring.\n\n"
+            "Keyin chekni 📸 shu botga yuboring."
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # PROMO
+    # -----------------------------------------------------
+
+    if state == "promo":
+
+        code = text.upper()
+
+        c = conn()
+
+        row = c.execute(
+            """
+            SELECT *
+            FROM promo_codes
+            WHERE code=?
+            AND active=1
+            """,
+            (code,)
+        ).fetchone()
+
+        c.close()
+
+        if not row:
+
+            await update.message.reply_text(
+                "❌ Promo kod noto'g'ri."
+            )
+
+            return
+
+        if (
+            row["max_uses"] > 0
+            and row["used"] >= row["max_uses"]
+        ):
+
+            await update.message.reply_text(
+                "❌ Promo kod limiti tugagan."
+            )
+
+            return
+
+        c = conn()
+
+        used = c.execute(
+            """
+            SELECT 1
+            FROM promo_users
+            WHERE user_id=?
+            AND code=?
+            """,
+            (
+                user.id,
+                code
+            )
+        ).fetchone()
+
+        c.close()
+
+        if used:
+
+            await update.message.reply_text(
+                "❌ Bu promo koddan "
+                "allaqachon foydalangansiz."
+            )
+
+            return
+
+        context.user_data[
+            "promo_code"
+        ] = code
+
+        context.user_data[
+            "state"
+        ] = None
+
+        await update.message.reply_text(
+            f"✅ Promo kod qabul qilindi!\n\n"
+            f"🎁 {code}\n"
+            f"💸 Chegirma: "
+            f"{row['percent']}%"
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # ORDER FIELDS
+    # -----------------------------------------------------
+
+    if state == "order_fields":
+
+        fields = context.user_data.get(
+            "fields",
+            []
+        )
+
+        index = context.user_data.get(
+            "input_index",
+            0
+        )
+
+        if index >= len(fields):
+
+            await confirm_order(
+                update.message,
+                context
+            )
+
+            return
+
+        field = fields[index]
+
+        key = field.get(
+            "key",
+            f"field_{index}"
+        )
+
+        context.user_data[
+            "field_values"
+        ][key] = text
+
+        context.user_data[
+            "input_index"
+        ] = index + 1
+
+        await ask_next_field(
+            update.message,
+            context
+        )
+
+        return
+
+
+# =========================================================
+# PHOTO / RECEIPT
+# =========================================================
+
+async def photo_handler(update, context):
+
+    user = update.effective_user
+
+    ensure_user(user)
+
+    if context.user_data.get(
+        "state"
+    ) != "waiting_receipt":
+
+        return
+
+    amount = context.user_data.get(
+        "deposit_amount"
+    )
+
+    if not amount:
+        return
+
+    photo = update.message.photo[-1]
+
+    photo_id = photo.file_id
+
+    c = conn()
+
+    cur = c.execute(
+        """
+        INSERT INTO payments
+        (
+            user_id,
+            amount,
+            photo_id,
+            created_at
+        )
+        VALUES (?, ?, ?, ?)
+        """,
+        (
+            user.id,
+            amount,
+            photo_id,
+            datetime.now().isoformat()
+        )
+    )
+
+    payment_id = cur.lastrowid
+
+    c.commit()
+    c.close()
+
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "✅ Tasdiqlash",
+                callback_data=f"payok:{payment_id}"
+            ),
+            InlineKeyboardButton(
+                "❌ Rad etish",
+                callback_data=f"payno:{payment_id}"
+            )
+        ]
+    ])
+
+    await update.message.reply_text(
+        "✅ Chek adminga yuborildi.\n\n"
+        "Tekshiruvdan so'ng balansingiz "
+        "to'ldiriladi."
+    )
 
     await context.bot.send_photo(
         chat_id=ADMIN_ID,
         photo=photo_id,
-        caption=caption_text,
-        reply_markup=admin_keyboard
+        caption=(
+            "💳 YANGI TO'LOV\n\n"
+            f"🧾 #{payment_id}\n"
+            f"👤 User: {user.id}\n"
+            f"💰 Summa: {amount:,.0f} so'm"
+        ),
+        reply_markup=kb
     )
 
-# --- ADMIN CHEK ORQALI BALANS QO'SHISH ---
-async def approve_payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
+    context.user_data.clear()
 
-    if query.from_user.id != ADMIN_ID:
-        await query.answer("❌ Faqat Admin.", show_alert=True)
+
+# =========================================================
+# PAYMENT ACTION
+# =========================================================
+
+async def payment_action(
+    update,
+    context
+):
+
+    q = update.callback_query
+
+    if q.from_user.id != ADMIN_ID:
         return
 
-    await query.answer()
+    action, pid = q.data.split(":")
 
-    data = query.data.split("_")
-    if len(data) != 4:
-        await query.answer("❌ To'lov ma'lumotlari noto'g'ri.", show_alert=True)
-        return
+    pid = int(pid)
 
-    try:
-        target_user_id = int(data[2])
-        payment_id = int(data[3])
-    except ValueError:
-        await query.answer("❌ To'lov ID noto'g'ri.", show_alert=True)
-        return
+    c = conn()
 
-    cursor.execute(
-        "SELECT amount, status FROM payments WHERE payment_id = ? AND user_id = ?",
-        (payment_id, target_user_id)
-    )
-    payment = cursor.fetchone()
+    row = c.execute(
+        """
+        SELECT *
+        FROM payments
+        WHERE id=?
+        """,
+        (pid,)
+    ).fetchone()
 
-    if not payment:
-        await query.answer("❌ To'lov topilmadi.", show_alert=True)
-        return
+    if not row:
 
-    amount, status = payment
+        c.close()
 
-    if status != "Kutilmoqda":
-        await query.answer(f"⚠️ To'lov allaqachon: {status}", show_alert=True)
-        return
-
-    if amount <= 0:
-        await query.answer("❌ To'lov summasi noto'g'ri.", show_alert=True)
-        return
-
-    cursor.execute(
-        "UPDATE users SET balance = balance + ? WHERE user_id = ?",
-        (amount, target_user_id)
-    )
-    cursor.execute(
-        "UPDATE payments SET status = 'Tasdiqlandi' WHERE payment_id = ?",
-        (payment_id,)
-    )
-    conn.commit()
-
-    try:
-        await query.edit_message_reply_markup(reply_markup=None)
-    except Exception:
-        pass
-
-    await query.message.reply_text(
-        f"✅ To'lov #{payment_id} tasdiqlandi.\n"
-        f"👤 User ID: {target_user_id}\n"
-        f"💰 Balansga {amount:,.0f} so'm qo'shildi."
-    )
-
-    try:
-        await context.bot.send_message(
-            target_user_id,
-            f"🎉 To'lovingiz tasdiqlandi!\n"
-            f"💰 Balansingizga {amount:,.0f} so'm qo'shildi."
+        await q.message.reply_text(
+            "❌ To'lov topilmadi."
         )
-    except Exception:
-        pass
 
-# --- ADMIN CHEKNI BEKOR QILISH ---
-async def reject_payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if query.from_user.id != ADMIN_ID:
-        await query.answer("❌ Faqat Admin.", show_alert=True)
-        return
-    await query.answer()
-    
-    data = query.data.split("_")
-    payment_id = data[2]
-
-    cursor.execute("UPDATE payments SET status = 'Rad etildi' WHERE payment_id = ?", (payment_id,))
-    conn.commit()
-    
-    try:
-        await query.edit_message_reply_markup(reply_markup=None)
-    except Exception:
-        pass
-        
-    if query.message.caption:
-        await query.message.edit_caption(caption=query.message.caption + "\n\n❌ **Holat:** To'lov rad etildi!")
-    else:
-        await query.message.reply_text("❌ To'lov rad etildi.")
-
-# --- ADMIN TO'LOVLAR TARIXINI KO'RISH (/payments) ---
-async def admin_payments_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-    
-    cursor.execute("SELECT payment_id, user_id, amount, status, created_at FROM payments ORDER BY payment_id DESC LIMIT 15")
-    payments = cursor.fetchall()
-
-    if not payments:
-        await update.message.reply_text("📭 Hozircha to'lovlar tarixi bo'sh.")
         return
 
-    msg = "📜 **Oxirgi to'lovlar tarixi:**\n\n"
-    for p in payments:
-        p_id, u_id, amt, status, date = p
-        amt_str = f"{amt:,.0f} so'm" if amt else "Aniqlanmagan"
-        msg += f"🆔 #{p_id} | User: <code>{u_id}</code>\n💰 Summa: {amt_str}\n📌 Holati: {status} | 🕒 {date}\n-------------------\n"
+    if row["status"] != "pending":
 
-    await update.message.reply_text(msg, parse_mode="HTML")
+        c.close()
 
-# --- ADMIN QO'LDA BALANS QO'SHISH (/addbalance) ---
-async def manual_add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return ConversationHandler.END
-    await update.message.reply_text("➕ Balansiga pul qo'shmoqchi bo'lgan foydalanuvchining ID raqamini kiriting:", reply_markup=cancel_keyboard())
-    return MANUAL_ADD_USER
+        await q.message.reply_text(
+            "⚠️ Bu to'lov allaqachon ko'rilgan."
+        )
 
-async def manual_add_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        user_id = int(update.message.text)
-        cursor.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
-        if not cursor.fetchone():
-            await update.message.reply_text("❌ Bunday foydalanuvchi topilmadi.", reply_markup=main_keyboard())
-            return ConversationHandler.END
-        
-        context.user_data['manual_add_user_id'] = user_id
-        await update.message.reply_text(f"💰 ID: {user_id} balansiga qancha so'm QO'SHMOQCHISIZ?", reply_markup=cancel_keyboard())
-        return MANUAL_ADD_AMOUNT
-    except ValueError:
-        await update.message.reply_text("❌ ID faqat raqamlardan iborat bo'lishi kerak.", reply_markup=main_keyboard())
-        return ConversationHandler.END
+        return
 
-async def manual_add_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        amount = float(update.message.text)
-        user_id = context.user_data['manual_add_user_id']
-        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
-        cursor.execute("INSERT INTO payments (user_id, amount, status, created_at) VALUES (?, ?, 'Qo''lda qo''shildi', ?)", (user_id, amount, current_time))
-        conn.commit()
-        
-        await update.message.reply_text(f"✅ ID: {user_id} balansiga {amount:,.0f} so'm qo'shildi!", reply_markup=main_keyboard())
-        await context.bot.send_message(user_id, f"🎉 Hisobingizga admin tomonidan {amount:,.0f} so'm qo'shildi!")
-    except ValueError:
-        await update.message.reply_text("❌ Noto'g'ri summa kiritildi.", reply_markup=main_keyboard())
-    return ConversationHandler.END
+    if action == "payok":
 
-# --- ADMIN QO'LDA BALANS AYRISH (/subbalance) ---
-async def manual_sub_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return ConversationHandler.END
-    await update.message.reply_text("➖ Balansidan pul AYRIMOQCHI bo'lgan foydalanuvchining ID raqamini kiriting:", reply_markup=cancel_keyboard())
-    return MANUAL_SUB_USER
+        c.execute(
+            """
+            UPDATE payments
+            SET status='approved'
+            WHERE id=?
+            """,
+            (pid,)
+        )
 
-async def manual_sub_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        user_id = int(update.message.text)
-        cursor.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
-        if not cursor.fetchone():
-            await update.message.reply_text("❌ Bunday foydalanuvchi topilmadi.", reply_markup=main_keyboard())
-            return ConversationHandler.END
-        
-        context.user_data['manual_sub_user_id'] = user_id
-        await update.message.reply_text(f"📉 ID: {user_id} balansidan qancha so'm AYRIMOQCHISIZ?", reply_markup=cancel_keyboard())
-        return MANUAL_SUB_AMOUNT
-    except ValueError:
-        await update.message.reply_text("❌ ID faqat raqamlardan iborat bo'lishi kerak.", reply_markup=main_keyboard())
-        return ConversationHandler.END
+        c.commit()
+        c.close()
 
-async def manual_sub_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        amount = float(update.message.text)
-        user_id = context.user_data.get('manual_sub_user_id')
-        
-        if not user_id:
-            await update.message.reply_text("❌ Xatolik yuz berdi. Qaytadan urinib ko'ring.", reply_markup=main_keyboard())
-            return ConversationHandler.END
-
-        if amount <= 0:
-            await update.message.reply_text("❌ Summa 0 dan katta bo'lishi kerak.", reply_markup=cancel_keyboard())
-            return MANUAL_SUB_AMOUNT
-
-        cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
-        res = cursor.fetchone()
-        current_balance = res[0] if res else 0
-
-        if current_balance < amount:
-            await update.message.reply_text(f"⚠️ Foydalanuvchining balansi yetarli emas! (Joriy balans: {current_balance:,.0f} so'm)", reply_markup=main_keyboard())
-            return ConversationHandler.END
-
-        cursor.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (amount, user_id))
-        conn.commit()
-        
-        await update.message.reply_text(f"✅ ID: {user_id} balansidan {amount:,.0f} so'm ayirib tashlandi!", reply_markup=main_keyboard())
-        await context.bot.send_message(user_id, f"⚠️ Balansingizdan admin tomonidan {amount:,.0f} so'm olib tashlandi.")
-        
-    except ValueError:
-        await update.message.reply_text("❌ Noto'g'ri summa kiritildi. Faqat raqam kiriting:", reply_markup=cancel_keyboard())
-        return MANUAL_SUB_AMOUNT
-        
-    return ConversationHandler.END
-
-# --- ADMIN POST YUBORISH (/post) ---
-async def post_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("❌ Bu buyruq faqat Admin uchun!")
-        return ConversationHandler.END
-
-    await update.message.reply_text(
-        "📢 Barcha foydalanuvchilarga yubormoqchi bo'lgan xabaringizni yuboring (Matn, rasm, video yoki istalgan fayl):",
-        reply_markup=cancel_keyboard()
-    )
-    return POST_MESSAGE
-
-async def post_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cursor.execute("SELECT user_id FROM users")
-    users = cursor.fetchall()
-
-    success_count = 0
-    fail_count = 0
-
-    await update.message.reply_text("⏳ Xabar foydalanuvchilarga tarqatilmoqda, iltimos kuting...", reply_markup=main_keyboard())
-
-    for user in users:
-        user_id = user[0]
-        try:
-            await update.message.copy(chat_id=user_id)
-            success_count += 1
-        except Exception:
-            fail_count += 1
-
-    await update.message.reply_text(
-        f"✅ Post muvaffaqiyatli tarqatildi!\n\n"
-        f"📤 Yuborildi: {success_count} ta\n"
-        f"❌ Xatolik (botni bloklaganlar): {fail_count} ta",
-        reply_markup=main_keyboard()
-    )
-    return ConversationHandler.END
-
-# --- PUL O'TKAZISH TIZIMI ---
-async def transfer_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("💸 Pul o'tkazmoqchi bo'lgan foydalanuvchining Telegram ID raqamini kiriting:", reply_markup=cancel_keyboard())
-    return TRANSFER_USER
-
-async def transfer_get_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        target_id = int(update.message.text)
-        if target_id == update.effective_user.id:
-            await update.message.reply_text("❌ O'zingizga pul o'tkaza olmaysiz!", reply_markup=main_keyboard())
-            return ConversationHandler.END
-
-        cursor.execute("SELECT user_id FROM users WHERE user_id = ?", (target_id,))
-        if not cursor.fetchone():
-            await update.message.reply_text("❌ Bunday foydalanuvchi botda topilmadi.", reply_markup=main_keyboard())
-            return ConversationHandler.END
-
-        context.user_data['transfer_target'] = target_id
-        await update.message.reply_text("Qancha summa o'tkazmoqchisiz (masalan: 10000)?", reply_markup=cancel_keyboard())
-        return TRANSFER_AMOUNT
-    except ValueError:
-        await update.message.reply_text("❌ Noto'g'ri ID kiritildi.", reply_markup=main_keyboard())
-        return ConversationHandler.END
-
-async def transfer_get_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        amount = float(update.message.text)
-        sender_id = update.effective_user.id
-        target_id = context.user_data['transfer_target']
-
-        if amount <= 0:
-            await update.message.reply_text("❌ Noto'g'ri summa kiritildi.", reply_markup=main_keyboard())
-            return ConversationHandler.END
-
-        cursor.execute("SELECT balance FROM users WHERE user_id = ?", (sender_id,))
-        res = cursor.fetchone()
-        sender_balance = res[0] if res else 0
-
-        if sender_balance < amount:
-            await update.message.reply_text("❌ Balansda yetarli mablag' mavjud emas!", reply_markup=main_keyboard())
-            return ConversationHandler.END
-
-        cursor.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (amount, sender_id))
-        cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, target_id))
-        conn.commit()
-
-        await update.message.reply_text(f"✅ {target_id} ID egasiga {amount:,.0f} so'm muvaffaqiyatli o'tkazildi!", reply_markup=main_keyboard())
-        await context.bot.send_message(target_id, f"🎉 Hisobingizga {sender_id} ID egasi tomonidan {amount:,.0f} so'm o'tkazildi!")
-
-    except ValueError:
-        await update.message.reply_text("❌ Noto'g'ri summa kiritildi.", reply_markup=main_keyboard())
-
-    return ConversationHandler.END
-
-# --- BUYURTMANI TEKSHIRISH ---
-async def check_order_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔍 Tekshirmoqchi bo'lgan Buyurtma ID raqamini kiriting:", reply_markup=cancel_keyboard())
-    return CHECK_ORDER
-
-async def check_order_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        order_id = int(update.message.text)
-        user_id = update.effective_user.id
-
-        cursor.execute("SELECT item_name, price, status FROM orders WHERE order_id = ? AND user_id = ?", (order_id, user_id))
-        order = cursor.fetchone()
-
-        if order:
-            item_name, price, status = order
-            status_icon = "⏳" if status == "Kutilmoqda" else ("✅" if status == "Bajarildi" else "❌")
-            msg = (
-                f"📦 Buyurtma #{order_id} ma'lumotlari:\n\n"
-                f"🔹 Mahsulot: {item_name}\n"
-                f"💵 Narxi: {price:,.0f} so'm\n"
-                f"📌 Holati: {status_icon} {status}"
+        add_balance(
+            row["user_id"],
+            Decimal(
+                str(row["amount"])
             )
-            await update.message.reply_text(msg, reply_markup=main_keyboard())
-        else:
-            await update.message.reply_text("❌ Sizga tegishli bunday buyurtma ID topilmadi.", reply_markup=main_keyboard())
+        )
 
-    except ValueError:
-        await update.message.reply_text("❌ Buyurtma ID faqat raqamlardan iborat bo'ladi.", reply_markup=main_keyboard())
+        await context.bot.send_message(
+            row["user_id"],
+            "✅ TO'LOV TASDIQLANDI!\n\n"
+            f"💰 +{row['amount']:,.0f} so'm\n"
+            f"💳 Yangi balans: "
+            f"{get_balance(row['user_id']):,.0f} so'm"
+        )
 
-    return ConversationHandler.END
+        await q.message.reply_text(
+            "✅ To'lov tasdiqlandi."
+        )
 
-# --- PROMOKOD ISHLATISH ---
-async def use_promo_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🎁 Promokodizni kiriting:", reply_markup=cancel_keyboard())
-    return USE_PROMO
+    else:
 
-async def use_promo_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    code = update.message.text.strip()
-    user_id = update.effective_user.id
+        c.execute(
+            """
+            UPDATE payments
+            SET status='rejected'
+            WHERE id=?
+            """,
+            (pid,)
+        )
 
-    cursor.execute("SELECT amount, limit_count, used_count FROM promocodes WHERE code = ?", (code,))
-    promo = cursor.fetchone()
+        c.commit()
+        c.close()
 
-    if not promo:
-        await update.message.reply_text("❌ Bunday promokod mavjud emas!", reply_markup=main_keyboard())
-        return ConversationHandler.END
+        await context.bot.send_message(
+            row["user_id"],
+            "❌ To'lovingiz rad etildi."
+        )
 
-    amount, limit_count, used_count = promo
+        await q.message.reply_text(
+            "❌ To'lov rad etildi."
+        )
 
-    if used_count >= limit_count:
-        await update.message.reply_text("❌ Ushbu promokod ishlatilish limiti tugagan!", reply_markup=main_keyboard())
-        return ConversationHandler.END
 
-    cursor.execute("SELECT 1 FROM promo_uses WHERE user_id = ? AND code = ?", (user_id, code))
-    if cursor.fetchone():
-        await update.message.reply_text("❌ Siz ushbu promokodni avval ishlatgansiz!", reply_markup=main_keyboard())
-        return ConversationHandler.END
+# =========================================================
+# ADMIN MENU
+# =========================================================
 
-    cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
-    cursor.execute("UPDATE promocodes SET used_count = used_count + 1 WHERE code = ?", (code,))
-    cursor.execute("INSERT INTO promo_uses (user_id, code) VALUES (?, ?)", (user_id, code))
-    conn.commit()
+def admin_kb():
 
-    await update.message.reply_text(f"🎉 Tabriklaymiz! Promokod muvaffaqiyatli faollashtirildi.\n💰 Balansingizga {amount:,.0f} so'm qo'shildi!", reply_markup=main_keyboard())
-    return ConversationHandler.END
-
-# --- ADMIN PROMOKOD YARATISH (/addpromo) ---
-async def add_promo_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("❌ Bu buyruq faqat Admin uchun!")
-        return ConversationHandler.END
-
-    await update.message.reply_text("🔑 Yangi promokod nomini kiriting (Masalan: BONUS5000):", reply_markup=cancel_keyboard())
-    return PROMO_CODE
-
-async def add_promo_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['new_promo_code'] = update.message.text.strip()
-    await update.message.reply_text("💰 Promokod summasini kiriting (so'mda):", reply_markup=cancel_keyboard())
-    return PROMO_AMOUNT
-
-async def add_promo_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        context.user_data['new_promo_amount'] = float(update.message.text)
-        await update.message.reply_text("👥 Nechta foydalanuvchi ishlata olishini (limit sonini) kiriting:", reply_markup=cancel_keyboard())
-        return PROMO_LIMIT
-    except ValueError:
-        await update.message.reply_text("❌ Summani raqamda kiriting.", reply_markup=main_keyboard())
-        return ConversationHandler.END
-
-async def add_promo_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        limit = int(update.message.text)
-        code = context.user_data['new_promo_code']
-        amount = context.user_data['new_promo_amount']
-
-        cursor.execute("INSERT OR REPLACE INTO promocodes (code, amount, limit_count) VALUES (?, ?, ?)", (code, amount, limit))
-        conn.commit()
-
-        await update.message.reply_text(f"✅ Promokod muvaffaqiyatli yaratildi!\n\n🔑 Kodu: {code}\n💰 Summasi: {amount:,.0f} so'm\n👥 Limiti: {limit} ta", reply_markup=main_keyboard())
-    except ValueError:
-        await update.message.reply_text("❌ Limit sonini raqamda kiriting.", reply_markup=main_keyboard())
-
-    return ConversationHandler.END
-
-# --- STATISTIKA ---
-async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cursor.execute("SELECT COUNT(*) FROM users")
-    users_count = cursor.fetchone()[0]
-    cursor.execute("SELECT COUNT(*) FROM orders")
-    orders_count = cursor.fetchone()[0]
-    await update.message.reply_text(
-        f"📊 Bot Statistikasi:\n\n👥 Foydalanuvchilar: {users_count} ta\n📦 Buyurtmalar: {orders_count} ta"
-    )
-
-# --- PROFIL ---
-async def show_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
-    res = cursor.fetchone()
-    balance = res[0] if res else 0
-    await update.message.reply_text(
-        f"👤 Sizning Profilingiz:\n\n🆔 ID: {user_id}\n💰 Balans: {balance:,.0f} so'm"
-    )
-
-# --- KATEGORIYALAR TIZIMI ---
-async def order_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📱 Telegram xizmatlari", callback_data="cat_telegram")],
-        [InlineKeyboardButton("🎮 PUBG Mobile UC", callback_data="cat_pubg")],
-        [InlineKeyboardButton("🔥 Free Fire Diamond", callback_data="cat_ff")],
-        [InlineKeyboardButton("🕹️ Grand Mobile ID", callback_data="cat_grand")]
-    ])
-    await update.message.reply_text("🛒 Kerakli bo'limni tanlang:", reply_markup=keyboard)
-
-async def category_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    if query.data == "cat_telegram":
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("TG Premium 3 Oy — 178,000 so'm", callback_data="buy_TG Premium 3 Oy_178000")],
-            [InlineKeyboardButton("TG Premium 6 Oy — 246,000 so'm", callback_data="buy_TG Premium 6 Oy_246000")],
-            [InlineKeyboardButton("TG Premium 12 Oy — 440,000 so'm", callback_data="buy_TG Premium 12 Oy_440000")],
-            [InlineKeyboardButton("TG Premium 1 Oy — 50,000 so'm", callback_data="buy_TG Premium 12 Oy_45000")],
-            [InlineKeyboardButton("TG Akkaunt — 8,000 so'm", callback_data="buy_TG Akkaunt_8000")],
-            [InlineKeyboardButton("🔙 Orqaga", callback_data="cat_back")]
-        ])
-        await query.edit_message_text("📱 Telegram xizmatlari:", reply_markup=keyboard)
-
-    elif query.data == "cat_pubg":
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("60 UC — 13,000 so'm", callback_data="buy_PUBG 60 UC_13000")],
-            [InlineKeyboardButton("120 UC — 24,000 so'm", callback_data="buy_PUBG 120 UC_24000")],
-            [InlineKeyboardButton("180 UC — 36,000 so'm", callback_data="buy_PUBG 180 UC_36000")],
-            [InlineKeyboardButton("325 UC — 59,000 so'm", callback_data="buy_PUBG 325 UC_59000")],
-            [InlineKeyboardButton("385 UC — 70,000 so'm", callback_data="buy_PUBG 385 UC_70000")],
-            [InlineKeyboardButton("660 UC — 115,000 so'm", callback_data="buy_PUBG 660 UC_115000")],
-            [InlineKeyboardButton("985 UC — 170,000 so'm", callback_data="buy_PUBG 985 UC_170000")],
-            [InlineKeyboardButton("1320 UC — 230,000 so'm", callback_data="buy_PUBG 1320 UC_230000")],
-            [InlineKeyboardButton("1800 UC — 280,000 so'm", callback_data="buy_PUBG 1800 UC_280000")],
-            [InlineKeyboardButton("2460 UC — 400,000 so'm", callback_data="buy_PUBG 2460 UC_400000")],
-            [InlineKeyboardButton("3850 UC — 550,000 so'm", callback_data="buy_PUBG 3850 UC_550000")],
-            [InlineKeyboardButton("5650 UC — 830,000 so'm", callback_data="buy_PUBG 5650 UC_830000")],
-            [InlineKeyboardButton("8100 UC — 1,100,000 so'm", callback_data="buy_PUBG 8100 UC_1100000")],
-            [InlineKeyboardButton("🔙 Orqaga", callback_data="cat_back")]
-        ])
-        await query.edit_message_text("🎮 PUBG Mobile UC paketlari:", reply_markup=keyboard)
-
-    elif query.data == "cat_ff":
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("110 Diamond — 12,000 so'm", callback_data="buy_FF 110 Diamond_12000")],
-            [InlineKeyboardButton("341 Diamond — 34,000 so'm", callback_data="buy_FF 341 Diamond_34000")],
-            [InlineKeyboardButton("572 Diamond — 56,000 so'm", callback_data="buy_FF 572 Diamond_56000")],
-            [InlineKeyboardButton("1166 Diamond — 110,000 so'm", callback_data="buy_FF 1166 Diamond_110000")],
-            [InlineKeyboardButton("2398 Diamond — 230,000 so'm", callback_data="buy_FF 2398 Diamond_230000")],
-            [InlineKeyboardButton("6160 Diamond — 550,000 so'm", callback_data="buy_FF 6160 Diamond_550000")],
-            [InlineKeyboardButton("Evo Acces 3D — 8,000 so'm", callback_data="buy_FF Evo Accsess_8000")],
-            [InlineKeyboardButton("Evo Acces 7D — 12,000 so'm", callback_data="buy_FF Evo Accsess 7D_12000")],
-            [InlineKeyboardButton("Evo Acces 30D — 40,000 so'm", callback_data="buy_FF Evo Accsess 30D_40000")],
-            [InlineKeyboardButton("Prime kichik 7 kunlik — 8,000 so'm", callback_data="buy_FF Prime kichkina 7 kunlik_8000")],
-            [InlineKeyboardButton("Prime 7 kunlik — 25,000 so'm", callback_data="buy_FF Prime 7 kunlik_25000")],
-            [InlineKeyboardButton("Prime oylik — 86,000 so'm", callback_data="buy_FF Prime oylik_86000")],
-            [InlineKeyboardButton("6 Level Up Package — 6,000 so'm", callback_data="buy_FF 6 Level Up Package_6000")],
-            [InlineKeyboardButton("10 Level Up Package — 11,000 so'm", callback_data="buy_FF 10 Level Up Package_11000")],
-            [InlineKeyboardButton("15 Level Up Package — 16,000 so'm", callback_data="buy_FF 15 Level Up Package_16000")],
-            [InlineKeyboardButton("20 Level Up Package — 20,000 so'm", callback_data="buy_FF 20 Level Up Package_20000")],
-            [InlineKeyboardButton("25 Level Up Package — 24,000 so'm", callback_data="buy_FF 25 Level Up Package_24000")],
-            [InlineKeyboardButton("30 Level Up Package — 28,000 so'm", callback_data="buy_FF 30 Level Up Package_28000")],
-            [InlineKeyboardButton("🔙 Orqaga", callback_data="cat_back")]
-        ])
-        await query.edit_message_text("🔥 Free Fire Diamond paketlari:", reply_markup=keyboard)
-
-    elif query.data == "cat_grand":
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("15 GC — 2,520 so'm", callback_data="buy_Grand 15 GC_3500")],
-            [InlineKeyboardButton("30 GC — 5,040 so'm", callback_data="buy_Grand 30 GC_5000")],
-            [InlineKeyboardButton("90 GC — 15,120 so'm", callback_data="buy_Grand 90 GC_15500")],
-            [InlineKeyboardButton("200 GC — 33,600 so'm", callback_data="buy_Grand 200 GC_34000")],
-            [InlineKeyboardButton("500 GC — 84,000 so'm", callback_data="buy_Grand 500 GC_85000")],
-            [InlineKeyboardButton("1000 GC — 168,000 so'm", callback_data="buy_Grand 1000 GC_169000")],
-            [InlineKeyboardButton("2500 GC — 421,000 so'm", callback_data="buy_Grand 2500 GC_422000")],
-            [InlineKeyboardButton("🔙 Orqaga", callback_data="cat_back")]
-        ])
-        await query.edit_message_text("🕹️ Grand Mobile GC paketlari:", reply_markup=keyboard)
-
-    elif query.data == "cat_back":
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📱 Telegram xizmatlari", callback_data="cat_telegram")],
-            [InlineKeyboardButton("🎮 PUBG Mobile UC", callback_data="cat_pubg")],
-            [InlineKeyboardButton("🔥 Free Fire Diamond", callback_data="cat_ff")],
-            [InlineKeyboardButton("🕹️ Grand Mobile ID", callback_data="cat_grand")]
-        ])
-        await query.edit_message_text("🛒 Kerakli bo'limni tanlang:", reply_markup=keyboard)
-
-    elif query.data == "admin_payments_history":
-        if query.from_user.id != ADMIN_ID:
-            await query.answer("❌ Bu bo'lim faqat Admin uchun.", show_alert=True)
-            return
-        cursor.execute("SELECT payment_id, user_id, amount, status, created_at FROM payments ORDER BY payment_id DESC LIMIT 10")
-        payments = cursor.fetchall()
-        msg = "📜 **Oxirgi to'lovlar tarixi:**\n\n"
-        for p in payments:
-            p_id, u_id, amt, status, date = p
-            amt_str = f"{amt:,.0f} so'm" if amt else "Kiritilmagan"
-            msg += f"🆔 #{p_id} | User: <code>{u_id}</code>\n💰 Summa: {amt_str}\n📌 Holat: {status} | 🕒 {date}\n-------------------\n"
-        await query.message.reply_text(msg, parse_mode="HTML")
-
-# --- BUYURTMA XARIDI ---
-async def process_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user_id = query.from_user.id
-    _, item_name, price = query.data.split("_")
-    price = float(price)
-
-    cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
-    res = cursor.fetchone()
-    balance = res[0] if res else 0
-
-    if balance < price:
-        await query.answer("❌ Hisobingizda yetarli pul yo'q!", show_alert=True)
-        return
-
-    cursor.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (price, user_id))
-    cursor.execute("INSERT INTO orders (user_id, item_name, price) VALUES (?, ?, ?)", (user_id, item_name, price))
-    order_id = cursor.lastrowid
-    conn.commit()
-
-    await query.edit_message_text(f"✅ Buyurtmangiz qabul qilindi!\n🆔 Buyurtma ID: {order_id}\n📦 Mahsulot: {item_name}")
-
-    admin_keyboard = InlineKeyboardMarkup([
+    return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("✅ Qabul qilish", callback_data=f"adm_accept_{order_id}"),
-            InlineKeyboardButton("❌ Rad etish", callback_data=f"adm_reject_{order_id}")
+            InlineKeyboardButton(
+                "🔄 Katalogni yangilash",
+                callback_data="a_sync"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "💰 Narxlarni boshqarish",
+                callback_data="a_prices"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "📊 Statistika",
+                callback_data="a_stats"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "💳 To'lovlar",
+                callback_data="a_payments"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🎁 Promo yaratish",
+                callback_data="a_promo"
+            )
         ]
     ])
-    await context.bot.send_message(
-        chat_id=ADMIN_ID,
-        text=f"🆕 Yangi Buyurtma!\n\n🆔 ID: {order_id}\n👤 User ID: {user_id}\n📦 Mahsulot: {item_name}\n💵 Narxi: {price:,.0f} so'm",
-        reply_markup=admin_keyboard
+
+
+async def admin(update, context):
+
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    await update.message.reply_text(
+        "👑 ADMIN PANEL",
+        reply_markup=admin_kb()
     )
 
-# --- ADMIN BUYURTMANI TASDIQLASHI ---
-async def admin_order_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if query.from_user.id != ADMIN_ID:
-        await query.answer("❌ Faqat Admin.", show_alert=True)
-        return
-    await query.answer()
-    _, action, order_id = query.data.split("_")
-    order_id = int(order_id)
 
-    cursor.execute("SELECT user_id, item_name, price, status FROM orders WHERE order_id = ?", (order_id,))
-    order = cursor.fetchone()
-    
-    if not order or order[3] != 'Kutilmoqda':
-        await query.edit_message_text("Ushbu buyurtma ko'rib chiqilgan.")
+# =========================================================
+# ADMIN CALLBACK
+# =========================================================
+
+async def admin_callback(
+    update,
+    context
+):
+
+    q = update.callback_query
+
+    if q.from_user.id != ADMIN_ID:
         return
 
-    user_id, item_name, price, status = order
+    d = q.data
 
-    if action == "accept":
-        cursor.execute("UPDATE orders SET status = 'Bajarildi' WHERE order_id = ?", (order_id,))
-        conn.commit()
-        await query.edit_message_text(f"✅ Buyurtma #{order_id} qabul qilindi.")
-        await context.bot.send_message(user_id, f"🎉 Sizning #{order_id} raqamli buyurtmangiz muvaffaqiyatli bajarildi!")
+    if d == "a_sync":
 
-    elif action == "reject":
-        cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (price, user_id))
-        cursor.execute("UPDATE orders SET status = 'Bekor qilindi' WHERE order_id = ?", (order_id,))
-        conn.commit()
-        await query.edit_message_text(f"❌ Buyurtma #{order_id} bekor qilindi.")
-        await context.bot.send_message(user_id, f"⚠️ Sizning #{order_id} raqamli buyurtmangiz bekor qilindi. Pul balansingizga qaytarildi.")
+        await q.message.reply_text(
+            "🔄 Katalog tekshirilmoqda..."
+        )
 
-# --- GLOBAL TEXT MESSAGE HANDLER ---
-async def global_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id != ADMIN_ID:
-        return
+        categories = get_all_categories()
 
-    target_user = context.user_data.get('waiting_for_balance_user')
-    payment_id = context.user_data.get('waiting_for_payment_id')
+        await q.message.reply_text(
+            "✅ Katalog tekshirildi!\n\n"
+            f"🎮 Mavjud kategoriya: "
+            f"{len(categories)} ta"
+        )
 
-    if target_user:
+    elif d == "a_prices":
+
+        c = conn()
+
+        rows = c.execute(
+            """
+            SELECT *
+            FROM products
+            WHERE active=1
+            ORDER BY game_name, offer_name
+            LIMIT 50
+            """
+        ).fetchall()
+
+        c.close()
+
+        if not rows:
+
+            await q.message.reply_text(
+                "❌ Mahsulotlar bazada yo'q.\n"
+                "Avval o'yinlarni ochib paketlarni yuklang."
+            )
+
+            return
+
+        kb = []
+
+        for r in rows:
+
+            text = (
+                f"{r['game_name'][:15]} | "
+                f"{r['offer_name'][:18]} | "
+                f"{r['sale_price']:,.0f}"
+            )
+
+            kb.append([
+                InlineKeyboardButton(
+                    text,
+                    callback_data=(
+                        f"ap:{r['category_id']}:"
+                        f"{r['offer_id']}"
+                    )
+                )
+            ])
+
+        await q.message.reply_text(
+            "💰 Narxini o'zgartirish uchun paketni bosing:",
+            reply_markup=InlineKeyboardMarkup(kb)
+        )
+
+    elif d.startswith("ap:"):
+
+        _, cid, oid = d.split(
+            ":",
+            2
+        )
+
+        c = conn()
+
+        row = c.execute(
+            """
+            SELECT *
+            FROM products
+            WHERE category_id=?
+            AND offer_id=?
+            """,
+            (
+                cid,
+                oid
+            )
+        ).fetchone()
+
+        c.close()
+
+        if not row:
+
+            await q.message.reply_text(
+                "❌ Mahsulot topilmadi."
+            )
+
+            return
+
+        context.user_data[
+            "admin_state"
+        ] = "set_price"
+
+        context.user_data[
+            "price_key"
+        ] = (
+            cid,
+            oid
+        )
+
+        await q.message.reply_text(
+            f"✏️ {row['game_name']}\n"
+            f"📦 {row['offer_name']}\n\n"
+            f"💰 Hozirgi narx: "
+            f"{row['sale_price']:,.0f} so'm\n\n"
+            "Yangi narxni yuboring:"
+        )
+
+    elif d == "a_stats":
+
+        c = conn()
+
+        income = c.execute(
+            """
+            SELECT COALESCE(
+                SUM(amount),
+                0
+            ) AS x
+            FROM payments
+            WHERE status='approved'
+            """
+        ).fetchone()["x"]
+
+        sales = c.execute(
+            """
+            SELECT COALESCE(
+                SUM(sale_price),
+                0
+            ) AS x
+            FROM orders
+            WHERE status NOT IN
+            ('failed', 'cancelled')
+            """
+        ).fetchone()["x"]
+
+        users = c.execute(
+            """
+            SELECT COUNT(*) AS x
+            FROM users
+            """
+        ).fetchone()["x"]
+
+        orders = c.execute(
+            """
+            SELECT COUNT(*) AS x
+            FROM orders
+            """
+        ).fetchone()["x"]
+
+        c.close()
+
+        await q.message.reply_text(
+            "📊 STATISTIKA\n\n"
+            f"💳 Kirim: {income:,.0f} so'm\n"
+            f"🛒 Sotuv: {sales:,.0f} so'm\n"
+            f"👥 User: {users}\n"
+            f"📦 Buyurtmalar: {orders}"
+        )
+
+    elif d == "a_payments":
+
+        c = conn()
+
+        rows = c.execute(
+            """
+            SELECT *
+            FROM payments
+            WHERE status='pending'
+            ORDER BY id DESC
+            LIMIT 20
+            """
+        ).fetchall()
+
+        c.close()
+
+        if not rows:
+
+            await q.message.reply_text(
+                "✅ Kutilayotgan to'lov yo'q."
+            )
+
+            return
+
+        text = "💳 KUTILAYOTGAN TO'LOVLAR\n\n"
+
+        for r in rows:
+
+            text += (
+                f"#{r['id']} | "
+                f"User {r['user_id']} | "
+                f"{r['amount']:,.0f} so'm\n"
+            )
+
+        await q.message.reply_text(
+            text
+        )
+
+    elif d == "a_promo":
+
+        context.user_data[
+            "admin_state"
+        ] = "promo"
+
+        await q.message.reply_text(
+            "🎁 PROMO YARATISH\n\n"
+            "Format:\n"
+            "KOD FOIZ LIMIT\n\n"
+            "Misol:\n"
+            "SALE10 10 100\n\n"
+            "Limit 0 = cheksiz"
+        )
+
+
+# =========================================================
+# ADMIN TEXT
+# =========================================================
+
+async def admin_text(
+    update,
+    context
+):
+
+    state = context.user_data.get(
+        "admin_state"
+    )
+
+    if state == "set_price":
+
         try:
-            amount = float(update.message.text)
-            
-            cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, int(target_user)))
-            
-            if payment_id:
-                cursor.execute("UPDATE payments SET amount = ?, status = 'Tasdiqlandi' WHERE payment_id = ?", (amount, int(payment_id)))
-            else:
-                current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                cursor.execute("INSERT INTO payments (user_id, amount, status, created_at) VALUES (?, ?, 'Tasdiqlandi', ?)", (int(target_user), amount, current_time))
-            
-            conn.commit()
 
-            await update.message.reply_text(f"✅ User ID {target_user} balansiga {amount:,.0f} so'm qo'shildi va to'lov saqlandi!", reply_markup=main_keyboard())
-            await context.bot.send_message(int(target_user), f"🎉 Hisobingiz admin tomonidan {amount:,.0f} so'mga to'ldirildi!")
+            price = Decimal(
+                update.message.text
+                .replace(",", "")
+                .replace(" ", "")
+            )
 
-            context.user_data.pop('waiting_for_balance_user', None)
-            context.user_data.pop('waiting_for_payment_id', None)
+        except InvalidOperation:
+
+            await update.message.reply_text(
+                "❌ Narx raqam bo'lishi kerak."
+            )
+
+            return
+
+        if price < 0:
+
+            await update.message.reply_text(
+                "❌ Narx manfiy bo'lmaydi."
+            )
+
+            return
+
+        cid, oid = context.user_data[
+            "price_key"
+        ]
+
+        c = conn()
+
+        c.execute(
+            """
+            UPDATE products
+            SET sale_price=?,
+                updated_at=?
+            WHERE category_id=?
+            AND offer_id=?
+            """,
+            (
+                float(price),
+                datetime.now().isoformat(),
+                cid,
+                oid
+            )
+        )
+
+        c.commit()
+        c.close()
+
+        context.user_data.pop(
+            "admin_state",
+            None
+        )
+
+        context.user_data.pop(
+            "price_key",
+            None
+        )
+
+        await update.message.reply_text(
+            f"✅ Narx o'zgartirildi:\n\n"
+            f"💰 {price:,.0f} so'm"
+        )
+
+    elif state == "promo":
+
+        parts = (
+            update.message.text
+            .split()
+        )
+
+        if len(parts) != 3:
+
+            await update.message.reply_text(
+                "❌ Format:\n"
+                "SALE10 10 100"
+            )
+
+            return
+
+        code = parts[0].upper()
+
+        try:
+
+            percent = float(
+                parts[1]
+            )
+
+            limit = int(
+                parts[2]
+            )
+
         except ValueError:
-            await update.message.reply_text("❌ Xato! Faqat raqam yuboring (masalan: 10000):")
-        return
 
-# --- CANCEL ---
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Jarayon bekor qilindi.", reply_markup=main_keyboard())
-    return ConversationHandler.END
+            await update.message.reply_text(
+                "❌ Foiz va limit raqam bo'lishi kerak."
+            )
 
-# --- BOTNI ISHGA TUSHIRISH ---
+            return
+
+        if (
+            percent <= 0
+            or percent > 100
+        ):
+
+            await update.message.reply_text(
+                "❌ Foiz 1-100 oralig'ida bo'lishi kerak."
+            )
+
+            return
+
+        if limit < 0:
+
+            await update.message.reply_text(
+                "❌ Limit 0 yoki undan katta bo'lishi kerak."
+            )
+
+            return
+
+        c = conn()
+
+        c.execute(
+            """
+            INSERT OR REPLACE INTO promo_codes
+            (
+                code,
+                percent,
+                max_uses,
+                used,
+                active
+            )
+            VALUES (?, ?, ?, 0, 1)
+            """,
+            (
+                code,
+                percent,
+                limit
+            )
+        )
+
+        c.commit()
+        c.close()
+
+        context.user_data.pop(
+            "admin_state",
+            None
+        )
+
+        await update.message.reply_text(
+            "✅ PROMO YARATILDI!\n\n"
+            f"🎁 Kod: {code}\n"
+            f"💸 Chegirma: {percent}%\n"
+            f"🔢 Limit: {limit}"
+        )
+
+
+# =========================================================
+# CALLBACK ROUTER
+# =========================================================
+
+async def callback_router(
+    update,
+    context
+):
+
+    q = update.callback_query
+
+    try:
+        await q.answer()
+    except Exception:
+        pass
+
+    d = q.data
+
+    try:
+
+        if d == "games":
+
+            await games(
+                update,
+                context
+            )
+
+        elif d == "balance":
+
+            await balance_cb(
+                update,
+                context
+            )
+
+        elif d == "deposit":
+
+            await deposit(
+                update,
+                context
+            )
+
+        elif d == "orders":
+
+            await orders_cb(
+                update,
+                context
+            )
+
+        elif d == "profile":
+
+            await profile(
+                update,
+                context
+            )
+
+        elif d == "promo":
+
+            await promo_cb(
+                update,
+                context
+            )
+
+        elif d.startswith("games"):
+
+            await game_page(
+                update,
+                context
+            )
+
+        elif d.startswith("g:"):
+
+            await game(
+                update,
+                context
+            )
+
+        elif d.startswith("o:"):
+
+            await offer(
+                update,
+                context
+            )
+
+        elif d == "confirm":
+
+            await confirm(
+                update,
+                context
+            )
+
+        elif d == "cancel":
+
+            await cancel(
+                update,
+                context
+            )
+
+        elif d.startswith("payok:"):
+
+            await payment_action(
+                update,
+                context
+            )
+
+        elif d.startswith("payno:"):
+
+            await payment_action(
+                update,
+                context
+            )
+
+        elif (
+            d.startswith("a_")
+            or d.startswith("ap:")
+        ):
+
+            await admin_callback(
+                update,
+                context
+            )
+
+        else:
+
+            await q.message.reply_text(
+                "❌ Noma'lum knopka."
+            )
+
+    except Exception as e:
+
+        log.exception(
+            "Callback xatosi"
+        )
+
+        try:
+
+            await q.message.reply_text(
+                "❌ Xatolik yuz berdi.\n\n"
+                f"{str(e)[:500]}"
+            )
+
+        except Exception:
+            pass
+
+
+# =========================================================
+# ORDER STATUS
+# =========================================================
+
+async def check_orders(context):
+
+    try:
+
+        c = conn()
+
+        rows = c.execute(
+            """
+            SELECT *
+            FROM orders
+            WHERE status IN
+            ('processing', 'pending', 'created')
+            AND fazer_order_id IS NOT NULL
+            AND fazer_order_id != ''
+            LIMIT 30
+            """
+        ).fetchall()
+
+        c.close()
+
+        for row in rows:
+
+            try:
+
+                status_code, data = api_get(
+                    "/orders/"
+                    + str(
+                        row["fazer_order_id"]
+                    )
+                )
+
+                if (
+                    status_code != 200
+                    or not data.get("ok")
+                ):
+
+                    status_code, data = api_get(
+                        "/topups/order/"
+                        + str(
+                            row["fazer_order_id"]
+                        )
+                    )
+
+                if not data.get("ok"):
+                    continue
+
+                order = data.get(
+                    "order",
+                    data
+                )
+
+                new_status = order.get(
+                    "status",
+                    row["status"]
+                )
+
+                if new_status == row["status"]:
+                    continue
+
+                c = conn()
+
+                c.execute(
+                    """
+                    UPDATE orders
+                    SET status=?
+                    WHERE id=?
+                    """,
+                    (
+                        new_status,
+                        row["id"]
+                    )
+                )
+
+                c.commit()
+                c.close()
+
+                await context.bot.send_message(
+                    row["user_id"],
+                    "📦 BUYURTMA STATUSI\n\n"
+                    f"🆔 #{row['id']}\n"
+                    f"📦 {row['product_name']}\n"
+                    f"📊 {new_status}"
+                )
+
+            except Exception as e:
+
+                log.error(
+                    "Order status xatosi: %s",
+                    e
+                )
+
+    except Exception as e:
+
+        log.error(
+            "check_orders xatosi: %s",
+            e
+        )
+
+
+# =========================================================
+# ERROR HANDLER
+# =========================================================
+
+async def error_handler(
+    update,
+    context
+):
+
+    log.exception(
+        "BOT ERROR",
+        exc_info=context.error
+    )
+
+
+# =========================================================
+# MAIN
+# =========================================================
+
 def main():
-    app = Application.builder().token(BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("payments", admin_payments_cmd))
-    app.add_handler(MessageHandler(filters.Regex("^📊 Statistika$"), show_stats))
-    app.add_handler(MessageHandler(filters.Regex("^👤 Balans va Profil$"), show_profile))
-    app.add_handler(MessageHandler(filters.Regex("^🛍️ Buyurtma berish$"), order_start))
-    
-    app.add_handler(MessageHandler(filters.PHOTO, handle_receipt_photo))
+    init_db()
 
-    app.add_handler(CallbackQueryHandler(category_callback, pattern="^(cat_|admin_payments_history)"))
-    app.add_handler(CallbackQueryHandler(process_buy, pattern="^buy_"))
-    app.add_handler(CallbackQueryHandler(admin_order_action, pattern="^adm_"))
-    app.add_handler(CallbackQueryHandler(approve_payment_callback, pattern="^pay_approve_"))
-    app.add_handler(CallbackQueryHandler(reject_payment_callback, pattern="^pay_reject_"))
+    if not BOT_TOKEN:
+        raise SystemExit(
+            "❌ BOT_TOKEN ni yozing."
+        )
 
-    # Balans to'ldirish uchun Conversation Handler
-    top_up_conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^💳 Balans to'ldirish$"), fill_balance_start)],
-        states={
-            TOP_UP_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex("^❌ Bekor qilish$"), fill_balance_amount)]
-        },
-        fallbacks=[MessageHandler(filters.Regex("^❌ Bekor qilish$"), cancel), CommandHandler("cancel", cancel)]
-    )
-    app.add_handler(top_up_conv)
+    if not FAZER_API_KEY:
+        raise SystemExit(
+            "❌ FAZER_API_KEY ni yozing."
+        )
 
-    transfer_conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^💸 Pul o'tkazish$"), transfer_start)],
-        states={
-            TRANSFER_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex("^❌ Bekor qilish$"), transfer_get_user)],
-            TRANSFER_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex("^❌ Bekor qilish$"), transfer_get_amount)]
-        },
-        fallbacks=[MessageHandler(filters.Regex("^❌ Bekor qilish$"), cancel), CommandHandler("cancel", cancel)]
+    if not ADMIN_ID:
+        raise SystemExit(
+            "❌ ADMIN_ID ni yozing."
+        )
+
+    print(
+        "================================="
     )
 
-    check_order_conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^🔍 Buyurtmani tekshirish$"), check_order_start)],
-        states={
-            CHECK_ORDER: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex("^❌ Bekor qilish$"), check_order_process)]
-        },
-        fallbacks=[MessageHandler(filters.Regex("^❌ Bekor qilish$"), cancel), CommandHandler("cancel", cancel)]
+    print(
+        "🎮 DONAT BOT ISHGA TUSHMOQDA..."
     )
 
-    use_promo_conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^🎁 Promokod$"), use_promo_start)],
-        states={
-            USE_PROMO: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex("^❌ Bekor qilish$"), use_promo_process)]
-        },
-        fallbacks=[MessageHandler(filters.Regex("^❌ Bekor qilish$"), cancel), CommandHandler("cancel", cancel)]
+    print(
+        "================================="
     )
 
-    add_promo_conv = ConversationHandler(
-        entry_points=[CommandHandler("addpromo", add_promo_start)],
-        states={
-            PROMO_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex("^❌ Bekor qilish$"), add_promo_code)],
-            PROMO_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex("^❌ Bekor qilish$"), add_promo_amount)],
-            PROMO_LIMIT: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex("^❌ Bekor qilish$"), add_promo_limit)]
-        },
-        fallbacks=[MessageHandler(filters.Regex("^❌ Bekor qilish$"), cancel), CommandHandler("cancel", cancel)]
+    app = (
+        Application
+        .builder()
+        .token(BOT_TOKEN)
+        .post_init(remove_bot_menu)
+        .build()
     )
 
-    manual_add_conv = ConversationHandler(
-        entry_points=[CommandHandler("addbalance", manual_add_start)],
-        states={
-            MANUAL_ADD_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex("^❌ Bekor qilish$"), manual_add_user)],
-            MANUAL_ADD_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex("^❌ Bekor qilish$"), manual_add_amount)]
-        },
-        fallbacks=[MessageHandler(filters.Regex("^❌ Bekor qilish$"), cancel), CommandHandler("cancel", cancel)]
+    # START
+    app.add_handler(
+        CommandHandler(
+            "start",
+            start
+        )
     )
 
-    manual_sub_conv = ConversationHandler(
-        entry_points=[CommandHandler("subbalance", manual_sub_start)],
-        states={
-            MANUAL_SUB_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex("^❌ Bekor qilish$"), manual_sub_user)],
-            MANUAL_SUB_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex("^❌ Bekor qilish$"), manual_sub_amount)]
-        },
-        fallbacks=[MessageHandler(filters.Regex("^❌ Bekor qilish$"), cancel), CommandHandler("cancel", cancel)]
+    # ADMIN
+    app.add_handler(
+        CommandHandler(
+            "admin",
+            admin
+        )
     )
 
-    post_conv = ConversationHandler(
-        entry_points=[CommandHandler("post", post_start)],
-        states={
-            POST_MESSAGE: [MessageHandler((filters.ALL & ~filters.COMMAND) & ~filters.Regex("^❌ Bekor qilish$"), post_send)]
-        },
-        fallbacks=[MessageHandler(filters.Regex("^❌ Bekor qilish$"), cancel), CommandHandler("cancel", cancel)]
+    # CALLBACK
+    app.add_handler(
+        CallbackQueryHandler(
+            callback_router
+        )
     )
 
-    app.add_handler(transfer_conv)
-    app.add_handler(check_order_conv)
-    app.add_handler(use_promo_conv)
-    app.add_handler(add_promo_conv)
-    app.add_handler(manual_add_conv)
-    app.add_handler(manual_sub_conv)
-    app.add_handler(post_conv)
+    # PHOTO
+    app.add_handler(
+        MessageHandler(
+            filters.PHOTO,
+            photo_handler
+        )
+    )
 
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, global_message_handler))
+    # TEXT
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT
+            & ~filters.COMMAND,
+            text_handler
+        )
+    )
 
-    print("Bot muvaffaqiyatli ishga tushdi...")
+    # STATUS
+    if app.job_queue:
+
+        app.job_queue.run_repeating(
+            check_orders,
+            interval=30,
+            first=30
+        )
+
+    # ERROR
+    app.add_error_handler(
+        error_handler
+    )
+
+    print(
+        "✅ BOT ISHLADI!"
+    )
+
+    print(
+        "🎮 PUBG / FREE FIRE / ROBLOX "
+        "VA BOSHQA O'YINLAR KATALOGDAN OLINADI."
+    )
+
     app.run_polling()
+
+
+# =========================================================
+# RUN
+# =========================================================
 
 if __name__ == "__main__":
     main()
