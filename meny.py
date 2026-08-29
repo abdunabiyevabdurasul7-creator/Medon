@@ -12,6 +12,13 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
 )
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyKeyboardRemove,  # <--- Mana buni qo'shasiz
+)
+
 from telegram.ext import (
     Application,
     CommandHandler,
