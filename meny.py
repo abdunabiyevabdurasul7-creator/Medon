@@ -36,7 +36,7 @@ BOT_TOKEN = "8611684086:AAF3lCOhLqV3B7Hi_klpmeTQcZMN6hjtKX01"
 
 ADMIN_ID = 5692925792
 
-FAZER_API_KEY = "fc_e2a3d96eda3c7f0bd6b4a139"
+FAZER_API_KEY = ""
 
 FAZER_BASE = "https://api.fzr.cards/api/v2"
 
